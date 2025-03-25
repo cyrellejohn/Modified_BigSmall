@@ -101,22 +101,27 @@ class MDMERLoader(BaseLoader):
     
     def preprocess_dataset_subprocess(self, data_dirs, config_preprocess, i, file_list_dict):
         """Invoked by preprocess_dataset for multi-process data preprocessing."""
+        
+        # Extract the subject path and saved filename
+        subject_path = data_dirs[i]['path']
+        saved_filename = data_dirs[i]['index']
+
+        # Paths to the raw video, camera trigger, and raw PPG files
+        raw_video = os.path.join(subject_path, "vid.mp4")
+        camera_trigger = pd.read_csv(os.path.join(subject_path, "camera.csv"), header=None)
+        raw_ppg = pd.read_csv(os.path.join(subject_path, "raw_ppg.csv"), header=None, usecols=[0, 1])
 
         # Working directory of the AUCoding from OpenFace
-        openface_au_static_dir = os.path.join(data_dirs[i]['path'], "facs", "openface", "au_static")
+        openface_au_static_dir = os.path.join(subject_path, "facs", "openface", "au_static")
 
-        # Extract the filename and index for saving processed data
-        filename = os.path.split(data_dirs[i]['path'])[-1]
-        saved_filename = data_dirs[i]['index']
+        start_time = self.get_start_frame(camera_trigger.values[0, 2], raw_ppg.values[0, 0])
 
         # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
         if 'None' in config_preprocess.DATA_AUG:
-            # Use dataset-specific function to read video frames from .avi file
-            frames = self.read_video(os.path.join(data_dirs[i]['path'], "vid.mp4"), config_preprocess)
-            print(os.path.join(data_dirs[i]['path'], "vid.mp4"))
-            print(frames.shape)
-            print(len(frames))
-            exit()
+            # Use dataset-specific function to read video frames from .mp4 file
+            print(subject_path)
+            print("LOL")
+            frames = self.read_video(raw_video, start_time, config_preprocess)
         elif 'Motion' in config_preprocess.DATA_AUG:
             # Use general function to read video frames from .npy files
             frames = self.read_npy_video(glob.glob(os.path.join(data_dirs[i]['path'],'*.npy')))
@@ -157,12 +162,28 @@ class MDMERLoader(BaseLoader):
         file_list_dict[i] = input_name_list
 
     @staticmethod
-    def read_video(video_file, config_preprocess):
+    def get_start_frame(start_camera_trigger, start_raw_ppg):
+        """
+        Finds the start frame of the video based on the camera trigger and raw PPG signal.
+
+        Args:
+            start_camera_trigger (ms): The start time of the camera trigger.
+            start_raw_ppg (ms): The start time of the raw PPG signal.
+        
+        """
+        # Convert start_camera_trigger and start_raw_ppg to datetime objects
+        result = start_raw_ppg - start_camera_trigger
+
+        return result
+        
+    @staticmethod
+    def read_video(video_file, start_time, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
         
         Args:
             video_file (str): The path to the video file to be read.
+            start_time (ms): The start time of the video.
         
         Returns:
             np.ndarray: A NumPy array of shape (T, H, W, 3) containing the video frames,
@@ -178,7 +199,7 @@ class MDMERLoader(BaseLoader):
         square_size = min(height, width)  # Determine the square size
         
         # Set the video position to the start (0 milliseconds)
-        VidObj.set(cv2.CAP_PROP_POS_MSEC, 0)
+        VidObj.set(cv2.CAP_PROP_POS_MSEC, start_time)
 
         # Read the first frame from the video
         success, frame = VidObj.read()
