@@ -19,6 +19,8 @@ from itertools import zip_longest
 
 from dataset.data_loader.BaseLoader import BaseLoader
 from tqdm import tqdm
+import torch
+from concurrent.futures import ProcessPoolExecutor
 
 
 class MDMERLoader(BaseLoader):
@@ -180,57 +182,102 @@ class MDMERLoader(BaseLoader):
     def read_video(video_file, start_time, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
+        Uses GPU acceleration and batch processing when available.
         
         Args:
             video_file (str): The path to the video file to be read.
             start_time (ms): The start time of the video.
+            config_preprocess: Preprocessing configuration
         
         Returns:
             np.ndarray: A NumPy array of shape (T, H, W, 3) containing the video frames,
                         where T is the number of frames, H is the height, W is the width,
                         and 3 represents the RGB color channels.
         """
-        # Initialize a VideoCapture object to read the video file
+        # Enable GPU decoding if available
+        use_gpu = torch.cuda.is_available()
+        if use_gpu:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "video_codec;h264_cuvid"
+
+        # Initialize video capture with GPU acceleration if available
         VidObj = cv2.VideoCapture(video_file)
+        if use_gpu:
+            VidObj.set(cv2.CAP_PROP_CUDA_DEVICE, 0)  # Use first GPU
 
-        # Get the height and width of the video
-        height = int(VidObj.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        width = int(VidObj.get(cv2.CAP_PROP_FRAME_WIDTH))
-        square_size = min(height, width)  # Determine the square size
-        
-        # Set the video position to the start (0 milliseconds)
-        VidObj.set(cv2.CAP_PROP_POS_MSEC, start_time)
+        try:
+            # Get video properties
+            height = int(VidObj.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            width = int(VidObj.get(cv2.CAP_PROP_FRAME_WIDTH))
+            square_size = min(height, width) # Determine the square size
+            
+            # Set the video position to start time
+            VidObj.set(cv2.CAP_PROP_POS_MSEC, start_time)
 
-        # Read the first frame from the video
-        success, frame = VidObj.read()
+            # Initialize lists for batch processing
+            frames = []
+            frame_batch = []
+            batch_size = 32  # Adjust based on available memory
 
-        # Initialize a list to store the center cropped frames
-        center_cropped_frames = list()
+            # Read frames in batches
+            with tqdm(desc="Reading frames", unit="frames") as pbar:
+                while True:
+                    success, frame = VidObj.read()
+                    if not success:
+                        break
 
-        # Loop to read frames until no more frames are available
-        while success:
-            # Center crop the frame to a square
-            center_cropped_frame = BaseLoader.center_crop_square(frame, height, width, square_size)
+                    # Process frame
+                    if frame is not None:
+                        # Center crop the frame
+                        frame = BaseLoader.center_crop_square(frame, height, width, square_size)
 
-            # Resize the frame optionally
-            if not config_preprocess.CROP_FACE.DO_CROP_FACE:
-                center_cropped_frame = BaseLoader.resize(center_cropped_frame, downsample=True)
+                        # Resize if needed
+                        if not config_preprocess.CROP_FACE.DO_CROP_FACE:
+                            frame = BaseLoader.resize(frame, downsample=True)
 
-            # Convert the frame from BGR to RGB format
-            center_cropped_frame = cv2.cvtColor(np.array(center_cropped_frame), cv2.COLOR_BGR2RGB)
+                        # Convert to RGB
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        
+                        # Add to batch
+                        frame_batch.append(frame)
 
-            # Convert the frame to a NumPy array
-            center_cropped_frame = np.asarray(center_cropped_frame)
+                        # Process batch when it reaches batch_size
+                        if len(frame_batch) == batch_size:
+                            # Convert batch to GPU tensor if available
+                            if use_gpu:
+                                batch_tensor = torch.from_numpy(np.array(frame_batch)).cuda()
+                                # Add any GPU processing here if needed
+                                processed_batch = batch_tensor.cpu().numpy()
+                            else:
+                                processed_batch = np.array(frame_batch)
 
-            # Append the frame to the center crop frames list
-            center_cropped_frames.append(center_cropped_frame)
+                            frames.extend(processed_batch)
+                            frame_batch = []
+                            
+                            # Update progress bar
+                            pbar.update(batch_size)
 
-            # Read the next frame
-            success, frame = VidObj.read()
-        
-        # Convert the list of frames to a NumPy array and return it
-        return np.asarray(center_cropped_frames)
-    
+            # Process remaining frames
+            if frame_batch:
+                if use_gpu:
+                    batch_tensor = torch.from_numpy(np.array(frame_batch)).cuda()
+                    processed_batch = batch_tensor.cpu().numpy()
+                else:
+                    processed_batch = np.array(frame_batch)
+                frames.extend(processed_batch)
+                pbar.update(len(frame_batch))
+
+            return np.array(frames)
+
+        except Exception as e:
+            print(f"Error processing video {video_file}: {str(e)}")
+            return None
+
+        finally:
+            # Release resources
+            VidObj.release()
+            if use_gpu:
+                torch.cuda.empty_cache()
+
     @staticmethod
     def read_phys_labels(working_dir):
         ppg = np.array([float(x) for x in open(os.path.join(working_dir, "ground_truth.txt")).readline().split()])
