@@ -121,6 +121,7 @@ class MDMERLoader(BaseLoader):
             # Use dataset-specific function to read video frames from .mp4 file
             print(subject_path)
             print("LOL")
+            exit()
             frames = self.read_video(raw_video, start_time, config_preprocess)
         elif 'Motion' in config_preprocess.DATA_AUG:
             # Use general function to read video frames from .npy files

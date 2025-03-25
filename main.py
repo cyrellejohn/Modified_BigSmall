@@ -45,9 +45,6 @@ general_generator.manual_seed(RANDOM_SEED)
 train_generator = torch.Generator()
 train_generator.manual_seed(RANDOM_SEED)
 
-# Configure the number of workers for video processing
-NUM_VIDEO_WORKERS = min(8, multiprocessing.cpu_count() // 2)  # Use half of available CPU cores
-
 def add_args(parser):
     """Adds arguments for parser."""
     parser.add_argument('--config_file', required=False,
@@ -144,7 +141,7 @@ if __name__ == "__main__":
             
             # Create a PyTorch DataLoader for the training data.
             data_loader_dict['train'] = DataLoader(dataset=train_data_loader, # The dataset to load.
-                                                   num_workers=NUM_VIDEO_WORKERS, # Default 16, 4 for now | Number of subprocesses to use for data loading.
+                                                   num_workers=8, # Default 16, 4 for now | Number of subprocesses to use for data loading.
                                                    batch_size=config.TRAIN.BATCH_SIZE, # Number of samples per batch to load.
                                                    shuffle=True, # Shuffle the data at every epoch.
                                                    worker_init_fn=seed_worker, # Function to initialize the random seed for each worker.
