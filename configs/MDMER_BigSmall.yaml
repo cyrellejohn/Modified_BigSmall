@@ -2,7 +2,7 @@ BASE: [''] # ALL ARE NOT FINAL
 TOOLBOX_MODE: "train_and_test"  # "train_and_test", "only_test", "only_preprocess"
 
 TRAIN:
-  BATCH_SIZE: 4 # Original BigSmall: 180
+  BATCH_SIZE: 180 # Original BigSmall: 180
   EPOCHS: 30 # Original BigSmall: 5
   LR: 9e-3 # Original BigSmall: 1e-3 
   MODEL_FILE_NAME: MDMER_BigSmall
@@ -127,7 +127,7 @@ MODEL:
 ################################################
 # COMPUTE RESOURCE SETTINGS
 ################################################
-DEVICE: cpu # cuda:0 or cpu
+DEVICE: cuda0 # cuda:0 or cpu
 NUM_OF_GPU_TRAIN: 1 # 2 use single GPU to plot attention masks, mostly used on BigSmall model
 
 ################################################

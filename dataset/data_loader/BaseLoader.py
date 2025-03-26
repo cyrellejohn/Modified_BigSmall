@@ -169,7 +169,7 @@ class BaseLoader(Dataset):
         """
         raise Exception("'split_raw_data' Not Implemented")
 
-    def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=8):
+    def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=24):
         """
         Allocate dataset preprocessing across multiple processes.
 
