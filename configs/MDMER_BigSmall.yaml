@@ -2,7 +2,7 @@ BASE: [''] # ALL ARE NOT FINAL
 TOOLBOX_MODE: "train_and_test"  # "train_and_test", "only_test", "only_preprocess"
 
 TRAIN:
-  BATCH_SIZE: 180 # Original BigSmall: 180
+  BATCH_SIZE: 128 # Original BigSmall: 180
   EPOCHS: 30 # Original BigSmall: 5
   LR: 9e-3 # Original BigSmall: 1e-3 
   MODEL_FILE_NAME: MDMER_BigSmall
@@ -16,7 +16,7 @@ TRAIN:
     CACHED_PATH: "data/MDMER/PreprocessedData" # Processed dataset save path, need to be updated
     EXP_DATA_NAME: "" 
     BEGIN: 0.0 
-    END: 0.7
+    END: 0.0137 # 0.7 Proper
     PREPROCESS:
       USE_PSUEDO_PPG_LABEL: True
       DATA_TYPE: ['DiffNormalized','Standardized'] # Can have multiple data type: ['Raw', 'DiffNormalized', 'Standardized']
@@ -127,7 +127,7 @@ MODEL:
 ################################################
 # COMPUTE RESOURCE SETTINGS
 ################################################
-DEVICE: cuda0 # cuda:0 or cpu
+DEVICE: cpu # cuda:0 or cpu
 NUM_OF_GPU_TRAIN: 1 # 2 use single GPU to plot attention masks, mostly used on BigSmall model
 
 ################################################

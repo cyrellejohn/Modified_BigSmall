@@ -49,7 +49,7 @@ def POS(frames, fps, order=1, low_cutoff=0.75, high_cutoff=3):
     fps (float): The sampling frequency of the video frames.
 
     Returns:
-    ndarray: The estimated blood volume pulse (BVP) signal extracted from the video frames.
+    ndarray: The estimated blood volume pulse (PPG) signal extracted from the video frames.
     """
     # Define the window size in seconds.
     WinSec = 1.6
@@ -88,20 +88,20 @@ def POS(frames, fps, order=1, low_cutoff=0.75, high_cutoff=3):
             # Update the array H with the processed signal h.
             H[0, m:n] = H[0, m:n] + (h[0])
 
-    # Initialize the BVP signal with the processed signal H.
-    BVP = H
+    # Initialize the PPG signal with the processed signal H.
+    PPG = H
 
-    # Detrend the BVP signal using a utility function.
-    BVP = utils.detrend(np.mat(BVP).H, 100)
+    # Detrend the PPG signal using a utility function.
+    PPG = utils.detrend(np.mat(PPG).H, 100)
 
     # Convert the detrended signal to a 1D array.
-    BVP = np.asarray(np.transpose(BVP))[0]
+    PPG = np.asarray(np.transpose(PPG))[0]
 
     # Design a bandpass filter with specified frequency range.
     b, a = signal.butter(order, [low_cutoff / fps * 2, high_cutoff / fps * 2], btype='bandpass')
 
-    # Apply the bandpass filter to the BVP signal.
-    BVP = signal.filtfilt(b, a, BVP.astype(np.double))
+    # Apply the bandpass filter to the PPG signal.
+    PPG = signal.filtfilt(b, a, PPG.astype(np.double))
 
-    # Return the filtered BVP signal.
-    return BVP
+    # Return the filtered PPG signal.
+    return PPG

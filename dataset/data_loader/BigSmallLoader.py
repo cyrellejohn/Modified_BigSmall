@@ -114,15 +114,12 @@ class MDMERLoader(BaseLoader):
         # Working directory of the AUCoding from OpenFace
         openface_au_static_dir = os.path.join(subject_path, "facs", "openface", "au_static")
 
-        start_time = self.get_start_frame(camera_trigger.values[0, 2], raw_ppg.values[0, 0])
-
+        start_frame, start_time_ppg = self.get_start_time(camera_trigger.values[0, 2], raw_ppg.values[0, 0])
+        
         # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
         if 'None' in config_preprocess.DATA_AUG:
             # Use dataset-specific function to read video frames from .mp4 file
-            print(subject_path)
-            print("LOL")
-            exit()
-            frames = self.read_video(raw_video, start_time, config_preprocess)
+            frames = self.read_video(raw_video, start_frame, config_preprocess)
         elif 'Motion' in config_preprocess.DATA_AUG:
             # Use general function to read video frames from .npy files
             frames = self.read_npy_video(glob.glob(os.path.join(data_dirs[i]['path'],'*.npy')))
@@ -130,8 +127,15 @@ class MDMERLoader(BaseLoader):
             # Raise an error if DATA_AUG configuration is unsupported
             raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
         
+        # Align Data
+        phys_labels = self.resample_ppg(raw_ppg.values[start_time_ppg:, 1], frames.shape[0])
+
+
+
+        # phys_labels = self.align_data(raw_ppg, start_time, frames.shape[0])
+
         # EXTRACT RAW PHYSIOLOGICAL SIGNAL LABELS 
-        phys_labels = self.read_phys_labels(data_dirs[i]['path'])
+        # phys_labels = self.read_phys_labels(data_dirs[i]['path'])
 
         # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
@@ -163,22 +167,35 @@ class MDMERLoader(BaseLoader):
         file_list_dict[i] = input_name_list
 
     @staticmethod
-    def get_start_frame(start_camera_trigger, start_raw_ppg):
+    def get_start_time(start_camera_trigger, start_raw_ppg, sampling_rate=100):
         """
         Finds the start frame of the video based on the camera trigger and raw PPG signal.
 
         Args:
             start_camera_trigger (ms): The start time of the camera trigger.
             start_raw_ppg (ms): The start time of the raw PPG signal.
-        
+            sampling_rate (int): The sampling rate of the PPG signal.
         """
-        # Convert start_camera_trigger and start_raw_ppg to datetime objects
-        result = start_raw_ppg - start_camera_trigger
+        start_frame = 0
+        start_time_ppg = 0
 
-        return result
-        
-    @staticmethod
-    def read_video(video_file, start_time, config_preprocess):
+        # If the camera trigger starts before the raw PPG signal, set the start frame to the difference between the two times
+        if start_camera_trigger < start_raw_ppg:
+            start_frame = start_raw_ppg - start_camera_trigger
+
+        # If the raw PPG signal starts before the camera trigger, set the start time of the PPG signal to the difference between the two times
+        elif start_camera_trigger > start_raw_ppg:
+            start_time_ppg = start_camera_trigger - start_raw_ppg
+
+            # Round milliseconds up to the nearest 1000
+            start_time_ppg = math.ceil(start_time_ppg / 1000.0)
+
+            # Calculate the number of samples to trim from the PPG signal
+            start_time_ppg = int(start_time_ppg * sampling_rate)
+
+        return start_frame, start_time_ppg
+    
+    def read_video(self, video_file, start_time, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
         
@@ -199,7 +216,7 @@ class MDMERLoader(BaseLoader):
         width = int(VidObj.get(cv2.CAP_PROP_FRAME_WIDTH))
         square_size = min(height, width)  # Determine the square size
         
-        # Set the video position to the start (0 milliseconds)
+        # Set the video position to the start tim
         VidObj.set(cv2.CAP_PROP_POS_MSEC, start_time)
 
         # Read the first frame from the video
@@ -207,15 +224,15 @@ class MDMERLoader(BaseLoader):
 
         # Initialize a list to store the center cropped frames
         center_cropped_frames = list()
-
+        i = 0
         # Loop to read frames until no more frames are available
         while success:
             # Center crop the frame to a square
-            center_cropped_frame = BaseLoader.center_crop_square(frame, height, width, square_size)
+            center_cropped_frame = self.center_crop_square(frame, height, width, square_size)
 
             # Resize the frame optionally
             if not config_preprocess.CROP_FACE.DO_CROP_FACE:
-                center_cropped_frame = BaseLoader.resize(center_cropped_frame, downsample=True)
+                center_cropped_frame = self.resize(center_cropped_frame, downsample=True)
 
             # Convert the frame from BGR to RGB format
             center_cropped_frame = cv2.cvtColor(np.array(center_cropped_frame), cv2.COLOR_BGR2RGB)
@@ -228,7 +245,8 @@ class MDMERLoader(BaseLoader):
 
             # Read the next frame
             success, frame = VidObj.read()
-        
+            i += 1
+            print(i)
         # Convert the list of frames to a NumPy array and return it
         return np.asarray(center_cropped_frames)
     
