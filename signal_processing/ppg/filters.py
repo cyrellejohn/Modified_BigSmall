@@ -1,6 +1,6 @@
 import scipy.signal as signal
 
-def butter_filter(data, low_cutoff=None, high_cutoff=None, sampling_rate=100, order=3, filter_type='band'):
+def butter_filter(data, low_cutoff=None, high_cutoff=None, sampling_rate=30, order=4, filter_type='band'):
     nyquist = 0.5 * sampling_rate
 
     if filter_type == 'band':

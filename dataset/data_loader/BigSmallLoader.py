@@ -10,6 +10,7 @@ import pandas as pd
 import pickle 
 
 from signal_processing.ppg import filters
+from unsupervised_methods.algorithm import POS
 
 # from unsupervised_methods.methods import POS_WANG
 # from unsupervised_methods import utils
@@ -18,6 +19,7 @@ from scipy import sparse
 import math
 from math import ceil
 from itertools import zip_longest
+from scipy import signal
 
 from dataset.data_loader.BaseLoader import BaseLoader
 from tqdm import tqdm
@@ -245,23 +247,40 @@ class MDMERLoader(BaseLoader):
         return np.asarray(center_cropped_frames)
     
     def preprocess_ppg(self, ppg_data, resample_target_length):
-        # Apply filters
-        variants = [
-            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=8, sampling_rate=100, order=3, filter_type='band'),
-            filters.butter_filter(ppg_data, high_cutoff=8, sampling_rate=100, order=2, filter_type='low'),
-            filters.butter_filter(ppg_data, low_cutoff=1, high_cutoff=8, sampling_rate=100, order=4, filter_type='band'),
-            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=8, sampling_rate=100, order=4, filter_type='band'),
-            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=20, sampling_rate=100, order=3, filter_type='band'),
-            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=20, sampling_rate=100, order=9, filter_type='band')
-        ]
+        filtered_ppg_data = self.apply_filters(ppg_data)
         
-        # Resample the original ppg_data and all variants
-        resampled_data = [self.resample_ppg(data, resample_target_length) for data in [ppg_data] + variants]
+        # Resample the original ppg_data and the filtered ppg_data
+        resampled_orig_ppg_data = self.resample_ppg(ppg_data, resample_target_length)
+        resampled_filtered_ppg_data = self.resample_ppg(filtered_ppg_data, resample_target_length)
         
-        # Stack the resampled original ppg_data and variants as columns to form a multi-column array
-        new_ppg_data = np.column_stack(resampled_data)
+        # Stack the resampled original ppg_data and the resampled filtered ppg_data as columns to form a multi-column array
+        new_ppg_data = np.column_stack([resampled_orig_ppg_data, resampled_filtered_ppg_data])
         
         return new_ppg_data
+    
+    def apply_filters(ppg_data):
+        new_ppg_data = filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=4, sampling_rate=100, order=3, filter_type='band'),
+
+        return new_ppg_data
+    
+    def generate_pos_ppg(self, frames, fps=30):
+        pos_ppg = POS.POS_WANG(frames, fps)
+
+        # TODO: Optional: Apply detrending but check first if there is a baseline drift
+
+        # Apply filters to the POS PPG signal
+        pos_ppg = self.apply_filters(pos_ppg)
+
+        # Compute the Hilbert transform to obtain the analytic signal
+        analytic_signal = signal.hilbert(pos_ppg) 
+
+        # Calculate the amplitude envelope of the analytic signal
+        amplitude_envelope = np.abs(analytic_signal)
+
+        # Normalize the PPG signal by its amplitude envelope
+        normalized_ppg = pos_ppg / amplitude_envelope 
+
+        return normalized_ppg
     
     @staticmethod
     def read_au_labels(aucoding_dir, pattern):
