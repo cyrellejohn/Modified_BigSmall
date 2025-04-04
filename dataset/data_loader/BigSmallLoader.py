@@ -9,9 +9,11 @@ import numpy as np
 import pandas as pd
 import pickle 
 
+from signal_processing.ppg import filters
+
 # from unsupervised_methods.methods import POS_WANG
 # from unsupervised_methods import utils
-from scipy import signal
+from scipy.signal import medfilt
 from scipy import sparse
 import math
 from math import ceil
@@ -115,7 +117,7 @@ class MDMERLoader(BaseLoader):
         openface_au_static_dir = os.path.join(subject_path, "facs", "openface", "au_static")
 
         start_frame, start_time_ppg = self.get_start_time(camera_trigger.values[0, 2], raw_ppg.values[0, 0])
-        
+
         # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
         if 'None' in config_preprocess.DATA_AUG:
             # Use dataset-specific function to read video frames from .mp4 file
@@ -127,20 +129,12 @@ class MDMERLoader(BaseLoader):
             # Raise an error if DATA_AUG configuration is unsupported
             raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
         
-        # Align Data
-        phys_labels = self.resample_ppg(raw_ppg.values[start_time_ppg:, 1], frames.shape[0])
-
-
-
-        # phys_labels = self.align_data(raw_ppg, start_time, frames.shape[0])
-
-        # EXTRACT RAW PHYSIOLOGICAL SIGNAL LABELS 
-        # phys_labels = self.read_phys_labels(data_dirs[i]['path'])
+        phys_labels = self.preprocess_ppg(raw_ppg.values[start_time_ppg:, 1], frames.shape[0])
 
         # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
             psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
-            
+         
         # EXTRACT AU OCCURENCE AND INTENSITY LABELS 
         au_occ, au_occ_names = self.read_au_labels(openface_au_static_dir, '_c')
         au_occ_names = au_occ_names.str.replace('_c', '_occ')
@@ -250,12 +244,25 @@ class MDMERLoader(BaseLoader):
         # Convert the list of frames to a NumPy array and return it
         return np.asarray(center_cropped_frames)
     
-    @staticmethod
-    def read_phys_labels(working_dir):
-        ppg = np.array([float(x) for x in open(os.path.join(working_dir, "ground_truth.txt")).readline().split()])
-
-        return ppg
-
+    def preprocess_ppg(self, ppg_data, resample_target_length):
+        # Apply filters
+        variants = [
+            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=8, sampling_rate=100, order=3, filter_type='band'),
+            filters.butter_filter(ppg_data, high_cutoff=8, sampling_rate=100, order=2, filter_type='low'),
+            filters.butter_filter(ppg_data, low_cutoff=1, high_cutoff=8, sampling_rate=100, order=4, filter_type='band'),
+            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=8, sampling_rate=100, order=4, filter_type='band'),
+            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=20, sampling_rate=100, order=3, filter_type='band'),
+            filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=20, sampling_rate=100, order=9, filter_type='band')
+        ]
+        
+        # Resample the original ppg_data and all variants
+        resampled_data = [self.resample_ppg(data, resample_target_length) for data in [ppg_data] + variants]
+        
+        # Stack the resampled original ppg_data and variants as columns to form a multi-column array
+        new_ppg_data = np.column_stack(resampled_data)
+        
+        return new_ppg_data
+    
     @staticmethod
     def read_au_labels(aucoding_dir, pattern):
         full_path = os.path.join(aucoding_dir, "AUCoding.csv")

@@ -986,32 +986,16 @@ class BaseLoader(Dataset):
         return image
 
     def generate_pos_ppg(self, frames, fps=30):
-        """
-        Generates pseudo labels for photoplethysmography (PPG) signals using the Plane-Orthogonal-to-Skin (POS) method.
-
-        Args:
-            frames (np.array): A numpy array of video frames from which to extract PPG signals.
-            fps (int, optional): The frames per second of the video. Default is 30.
-
-        Returns:
-            np.array: An array of amplitude-normalized PPG signals, serving as pseudo labels.
-
-        Description:
-            This function processes video frames to extract PPG signals, which are then normalized using the Hilbert transform
-            to produce amplitude-normalized pseudo labels. These labels can be used for training or evaluating models that
-            predict PPG signals from video data.
-        """
-        # Apply the POS algorithm to extract the BVP signal
-        pos_bvp = POS.POS(frames, fps, order=2, low_cutoff=0.70, high_cutoff=3)
+        pos_ppg = POS.POS(frames, fps)
 
         # Compute the Hilbert transform to obtain the analytic signal
-        analytic_signal = signal.hilbert(pos_bvp) 
+        analytic_signal = signal.hilbert(pos_ppg) 
 
         # Calculate the amplitude envelope of the analytic signal
         amplitude_envelope = np.abs(analytic_signal)
 
         # Normalize the BVP signal by its amplitude envelope
-        env_norm_bvp = pos_bvp / amplitude_envelope  # Normalize by envelope
+        env_norm_bvp = pos_ppg / amplitude_envelope  # Normalize by envelope
 
         # Return the normalized BVP signal as a NumPy array
         return np.array(env_norm_bvp)
