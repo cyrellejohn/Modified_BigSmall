@@ -14,7 +14,6 @@ from scipy import sparse
 import math
 from multiprocessing import Pool, Process, Value, Array, Manager
 from unsupervised_methods.algorithm import POS
-from unsupervised_methods import utils
 
 '''
 Unsupervised methods will not work on this project.
