@@ -170,8 +170,22 @@ class MDMERLoader(BaseLoader):
             combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + colnames)
             self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
         
-        # Preprocess the video frames and labels
-        big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, au_occ, au_int, config_preprocess)
+        # Combine all AU occurrence and intensity features
+        au_occ_all = np.concatenate(
+            [au_occ_lf] + [openface_labels[key] for key in openface_labels if key.startswith('au_occ_of_')],
+            axis=1)
+        au_int_all = np.concatenate(
+            [au_int_lf] + [openface_labels[key] for key in openface_labels if key.startswith('au_int_of_')],
+            axis=1)
+
+        # Run full preprocessing
+        big_clips, small_clips, label_clips = self.preprocess(frames, 
+                                                              phys_labels, 
+                                                              psuedo_phys_labels, 
+                                                              au_occ_all, 
+                                                              au_int_all, 
+                                                              emotion_lf, 
+                                                              config_preprocess)                                               
         
         # Save the processed data with its file chunks and update the file list dictionary
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
@@ -348,7 +362,7 @@ class MDMERLoader(BaseLoader):
 
         return label_list
 
-    def preprocess(self, frames, phys_labels, psuedo_phys_labels, au_occ, au_int, config_preprocess):
+    def preprocess(self, frames, phys_labels, psuedo_phys_labels, au_occ, au_int, emotion, config_preprocess):
         ##########################################
         ########## PREPROCESSING FRAMES ##########
         ##########################################
@@ -412,15 +426,20 @@ class MDMERLoader(BaseLoader):
         ########## PREPROCESSING LABELS ##########
         ##########################################
 
-        # REMOVING OUTLIERS - PENDING
+        ppg = phys_labels[:, 0]
+        filtered_ppg = phys_labels[:, 1]
+
+        # TODO: REMOVING OUTLIERS
 
         if config_preprocess.LABEL_TYPE == "Raw":
             pass
         elif config_preprocess.LABEL_TYPE == "DiffNormalized":
-            phys_labels = BaseLoader.diff_normalize_label(phys_labels)
+            ppg = BaseLoader.diff_normalize_label(ppg)
+            filtered_ppg = BaseLoader.diff_normalize_label(filtered_ppg)
             psuedo_phys_labels = BaseLoader.diff_normalize_label(psuedo_phys_labels)
         elif config_preprocess.LABEL_TYPE == "Standardized":
-            phys_labels = BaseLoader.standardized_label(phys_labels)
+            ppg = BaseLoader.standardized_label(ppg)
+            filtered_ppg = BaseLoader.standardized_label(filtered_ppg)
             psuedo_phys_labels = BaseLoader.standardized_label(psuedo_phys_labels)
         else:
             raise ValueError("Unsupported label type!")
@@ -430,15 +449,15 @@ class MDMERLoader(BaseLoader):
         ##########  COMBINE LABELS ###########
         ######################################
 
-        # If phys_labels and psuedo_phys_labels is 1D, reshape it to 2D with one column
-        if phys_labels.ndim == 1:
-            phys_labels = phys_labels.reshape(-1, 1)
-
+        # If ppg, filtered_ppg, and psuedo_phys_labels is 1D, reshape it to 2D with one column
+        if ppg.ndim == 1:
+            ppg = ppg.reshape(-1, 1)
+        if filtered_ppg.ndim == 1:
+            filtered_ppg = filtered_ppg.reshape(-1, 1)
         if psuedo_phys_labels.ndim == 1:
             psuedo_phys_labels = psuedo_phys_labels.reshape(-1, 1)
 
-        labels = np.concatenate((phys_labels, psuedo_phys_labels, au_occ, au_int), axis=1)
-
+        labels = np.concatenate((ppg, filtered_ppg, psuedo_phys_labels, au_occ, au_int, emotion), axis=1)
 
         ######################################
         ######## CHUNK DATA / LABELS #########
