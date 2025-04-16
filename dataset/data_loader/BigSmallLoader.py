@@ -106,6 +106,8 @@ class MDMERLoader(BaseLoader):
     def preprocess_dataset_subprocess(self, data_dirs, config_preprocess, i, file_list_dict):
         """Invoked by preprocess_dataset for multi-process data preprocessing."""
         
+        all_colnames = []
+
         # Extract the subject path and saved filename
         subject_path = data_dirs[i]['path']
         saved_filename = data_dirs[i]['index']
@@ -115,8 +117,8 @@ class MDMERLoader(BaseLoader):
         subject_ppg = pd.read_csv(os.path.join(subject_path, "ppg.csv"), skiprows=1, header=None)
 
         # Working directory of the AUCoding from OpenFace
-        libreface_aucoding_dir = os.path.join(subject_path, "facs", "libreface")
-        openface_aucoding_dir = os.path.join(subject_path, "facs", "openface")
+        libreface_dir = os.path.join(subject_path, "facs", "libreface")
+        openface_dir = os.path.join(subject_path, "facs", "openface")
 
         # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
         if 'None' in config_preprocess.DATA_AUG:
@@ -132,26 +134,66 @@ class MDMERLoader(BaseLoader):
         phys_labels = self.preprocess_ppg(subject_ppg.values[:, 3], frames.shape[0])
 
         # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
+        psuedo_phys_labels = None
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
             psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
          
-        # EXTRACT AU OCCURENCE AND INTENSITY LABELS 
-        au_occ, au_occ_names = self.read_au_labels(libreface_aucoding_dir, '_c')
-        au_occ_names = au_occ_names.str.replace('_c', '_occ')
-        au_int, au_int_names = self.read_au_labels(libreface_aucoding_dir, '_r')
-        au_int_names = au_int_names.str.replace('_r', '_int')
+        # Label extraction
+        au_occ_lf, au_int_lf, emotion_lf, \
+        au_occ_colname_lf, au_int_colname_lf, emotion_colname_lf = \
+            self.extract_labels_libreface(libreface_dir)
 
-        # Check for shape mismatches between video frames, physiological labels, au occurence and au intensity
-        mismatched = [name for name, label in zip(["phys_labels", "psuedo_phys_labels", "au_occ", "au_int"], \
-                                                  (phys_labels, psuedo_phys_labels, au_occ, au_int)) if label.shape[0] != frames.shape[0]]
+        # Extract labels
+        # au_occ_lf, au_int_lf, emotion_lf, *lf_colnames = self.extract_labels_libreface(libreface_dir)
+
+        variants = ['au_dynamic', 'au_dynamic_wild', 'au_static', 'au_static_wild']
+        openface_labels = self.extract_labels_openface(openface_dir, variants)
+
+        # Unpack if needed
+        au_occ_of, au_int_of, au_occ_of_colname, au_int_of_colname = openface_labels['au_dynamic']
+        au_occ_of_wild, au_int_of_wild, au_occ_of_wild_colname, au_int_of_wild_colname = openface_labels['au_dynamic_wild']
+        au_occ_of_static, au_int_of_static, au_occ_of_static_colname, au_int_of_static_colname = openface_labels['au_static']
+        au_occ_of_static_wild, au_int_of_static_wild, au_occ_of_static_wild_colname, au_int_of_static_wild_colname = openface_labels['au_static_wild']
+
+        labels = {
+            'phys_labels': phys_labels,
+            'psuedo_phys_labels': psuedo_phys_labels,
+            'au_occ_lf': au_occ_lf,
+            'au_int_lf': au_int_lf,
+            'emotion_lf': emotion_lf,
+            'au_occ_of': au_occ_of,
+            'au_int_of': au_int_of,
+            'au_occ_of_wild': au_occ_of_wild,
+            'au_int_of_wild': au_int_of_wild,
+            'au_occ_of_static': au_occ_of_static,
+            'au_int_of_static': au_int_of_static,
+            'au_occ_of_static_wild': au_occ_of_static_wild,
+            'au_int_of_static_wild': au_int_of_static_wild            
+        }
+
+        all_colnames += au_occ_colname_lf
+        all_colnames += au_int_colname_lf
+        all_colnames += emotion_colname_lf
+        all_colnames += au_occ_of_colname
+        all_colnames += au_int_of_colname
+        all_colnames += au_occ_of_wild_colname
+        all_colnames += au_int_of_wild_colname
+        all_colnames += au_occ_of_static_colname
+        all_colnames += au_int_of_static_colname
+        all_colnames += au_occ_of_static_wild_colname
+        all_colnames += au_int_of_static_wild_colname
+
+
+        mismatched = [name for name, label in labels.items() if label.shape[0] != frames.shape[0]]
         assert not mismatched, f"Shape mismatch in: {', '.join(mismatched)}. Expected shape: {frames.shape[0]}"
 
         if self.dataset_name == "train" and i == 0:
             label_list_path = os.path.dirname(self.raw_data_path)
-            label_names = pd.Index(['ppg', 'pos_env_norm_ppg'])
+            base_colname = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'])
+            all_colnames_index = pd.Index(all_colnames)
 
-            combine_label_names = label_names.append(au_occ_names).append(au_int_names)
-            self.save_label_names(combine_label_names, label_list_path)
+            combine_colnames = base_colname.append(all_colnames_index)
+            self.save_label_names(combine_colnames, label_list_path)
 
         # Preprocess the video frames and labels
         big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, au_occ, au_int, config_preprocess)
@@ -250,17 +292,78 @@ class MDMERLoader(BaseLoader):
         normalized_ppg = pos_ppg / amplitude_envelope 
 
         return normalized_ppg
-    
-    @staticmethod
-    def read_au_labels(aucoding_dir, pattern):
-        full_path = os.path.join(aucoding_dir, "AUCoding.csv")
         
-        # Read the CSV file and filter columns ending with a pattern
-        df = pd.read_csv(full_path, header=0)
-        au_label = df.filter(like=pattern).to_numpy()
-        label_names = df.filter(like=pattern).columns
+    @staticmethod
+    def extract_labels_libreface(aucoding_dir):
+        full_path = os.path.join(aucoding_dir, "full_output.csv")
 
-        return au_label, label_names
+        # Step 1: Read the header line
+        try:
+            with open(full_path, 'r') as f:
+                all_columns = f.readline().strip().split(',')
+        except FileNotFoundError:
+            raise FileNotFoundError(f"CSV file not found at path: {full_path}")
+
+        # Step 2: Find the index of the column named exactly 'au_1'
+        try:
+            start_index = all_columns.index('au_1')
+        except ValueError:
+            raise ValueError("'au_1' column not found in CSV header.")
+
+        # Step 3: Slice from 'au_1' onward
+        important_columns = all_columns[start_index:]
+
+        # Step 4: Load only those columns
+        df = pd.read_csv(full_path, usecols=important_columns)
+
+        # Step 5: Split into AU occurrence, AU intensity, and emotion
+        au_occ = df.filter(regex=r'^au_\d+$')
+        au_int = df.filter(regex=r'^au_\d+_intensity$')
+        emotion = df.filter(like='facial_expression')
+
+        return (
+            au_occ,
+            au_int,
+            emotion,
+            au_occ.columns,
+            au_int.columns,
+            emotion.columns
+        )
+
+    @staticmethod
+    def extract_labels_openface(aucoding_dir, variation):
+        def _extract_single(variation):
+            full_path = os.path.join(aucoding_dir, variation, "full_output.csv")
+
+            try:
+                with open(full_path, 'r') as f:
+                    all_columns = f.readline().strip().split(',')
+            except FileNotFoundError:
+                raise FileNotFoundError(f"CSV file not found at path: {full_path}")
+
+            try:
+                start_index = all_columns.index('AU01_r')
+            except ValueError:
+                raise ValueError("'AU01_r' column not found in CSV header.")
+
+            important_columns = all_columns[start_index:]
+            df = pd.read_csv(full_path, usecols=important_columns)
+
+            au_occ = df.filter(like='_c')
+            au_int = df.filter(like='_r')
+
+            au_occ_colname = au_occ.columns.str.replace('_c', '_occ')
+            au_int_colname = au_int.columns.str.replace('_r', '_int')
+
+            return au_occ, au_int, au_occ_colname, au_int_colname
+
+        if isinstance(variation, list):
+            results = {}
+            for v in variation:
+                results[v] = _extract_single(v)
+            return results
+        else:
+            return _extract_single(variation)
 
     @staticmethod
     def save_label_names(data, label_list_path):
