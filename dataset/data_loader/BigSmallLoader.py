@@ -111,19 +111,17 @@ class MDMERLoader(BaseLoader):
         saved_filename = data_dirs[i]['index']
 
         # Paths to the raw video, camera trigger, and raw PPG files
-        raw_video = os.path.join(subject_path, "vid.mp4")
-        camera_trigger = pd.read_csv(os.path.join(subject_path, "camera.csv"), header=None)
-        raw_ppg = pd.read_csv(os.path.join(subject_path, "raw_ppg.csv"), header=None, usecols=[0, 1])
+        subject_video = os.path.join(subject_path, "vid.mp4")
+        subject_ppg = pd.read_csv(os.path.join(subject_path, "ppg.csv"), skiprows=1, header=None)
 
         # Working directory of the AUCoding from OpenFace
-        openface_au_static_dir = os.path.join(subject_path, "facs", "openface", "au_static")
-
-        start_frame, start_time_ppg = self.get_start_time(camera_trigger.values[0, 2], raw_ppg.values[0, 0])
+        libreface_aucoding_dir = os.path.join(subject_path, "facs", "libreface")
+        openface_aucoding_dir = os.path.join(subject_path, "facs", "openface")
 
         # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
         if 'None' in config_preprocess.DATA_AUG:
             # Use dataset-specific function to read video frames from .mp4 file
-            frames = self.read_video(raw_video, start_frame, config_preprocess)
+            frames = self.read_video(subject_video, config_preprocess)
         elif 'Motion' in config_preprocess.DATA_AUG:
             # Use general function to read video frames from .npy files
             frames = self.read_npy_video(glob.glob(os.path.join(data_dirs[i]['path'],'*.npy')))
@@ -131,16 +129,16 @@ class MDMERLoader(BaseLoader):
             # Raise an error if DATA_AUG configuration is unsupported
             raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
         
-        phys_labels = self.preprocess_ppg(raw_ppg.values[start_time_ppg:, 1], frames.shape[0])
+        phys_labels = self.preprocess_ppg(subject_ppg.values[:, 3], frames.shape[0])
 
         # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
             psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
          
         # EXTRACT AU OCCURENCE AND INTENSITY LABELS 
-        au_occ, au_occ_names = self.read_au_labels(openface_au_static_dir, '_c')
+        au_occ, au_occ_names = self.read_au_labels(libreface_aucoding_dir, '_c')
         au_occ_names = au_occ_names.str.replace('_c', '_occ')
-        au_int, au_int_names = self.read_au_labels(openface_au_static_dir, '_r')
+        au_int, au_int_names = self.read_au_labels(libreface_aucoding_dir, '_r')
         au_int_names = au_int_names.str.replace('_r', '_int')
 
         # Check for shape mismatches between video frames, physiological labels, au occurence and au intensity
@@ -161,43 +159,14 @@ class MDMERLoader(BaseLoader):
         # Save the processed data with its file chunks and update the file list dictionary
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
         file_list_dict[i] = input_name_list
-
-    @staticmethod
-    def get_start_time(start_camera_trigger, start_raw_ppg, sampling_rate=100):
-        """
-        Finds the start frame of the video based on the camera trigger and raw PPG signal.
-
-        Args:
-            start_camera_trigger (ms): The start time of the camera trigger.
-            start_raw_ppg (ms): The start time of the raw PPG signal.
-            sampling_rate (int): The sampling rate of the PPG signal.
-        """
-        start_frame = 0
-        start_time_ppg = 0
-
-        # If the camera trigger starts before the raw PPG signal, set the start frame to the difference between the two times
-        if start_camera_trigger < start_raw_ppg:
-            start_frame = start_raw_ppg - start_camera_trigger
-
-        # If the raw PPG signal starts before the camera trigger, set the start time of the PPG signal to the difference between the two times
-        elif start_camera_trigger > start_raw_ppg:
-            start_time_ppg = start_camera_trigger - start_raw_ppg
-
-            # Round milliseconds up to the nearest 1000
-            start_time_ppg = math.ceil(start_time_ppg / 1000.0)
-
-            # Calculate the number of samples to trim from the PPG signal
-            start_time_ppg = int(start_time_ppg * sampling_rate)
-
-        return start_frame, start_time_ppg
     
-    def read_video(self, video_file, start_time, config_preprocess):
+    @staticmethod
+    def read_video(video_file, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
         
         Args:
             video_file (str): The path to the video file to be read.
-            start_time (ms): The start time of the video.
         
         Returns:
             np.ndarray: A NumPy array of shape (T, H, W, 3) containing the video frames,
@@ -212,23 +181,23 @@ class MDMERLoader(BaseLoader):
         width = int(VidObj.get(cv2.CAP_PROP_FRAME_WIDTH))
         square_size = min(height, width)  # Determine the square size
         
-        # Set the video position to the start tim
-        VidObj.set(cv2.CAP_PROP_POS_MSEC, start_time)
+        # Set the video position to the start (0 milliseconds)
+        VidObj.set(cv2.CAP_PROP_POS_MSEC, 0)
 
         # Read the first frame from the video
         success, frame = VidObj.read()
 
         # Initialize a list to store the center cropped frames
         center_cropped_frames = list()
-        i = 0
+
         # Loop to read frames until no more frames are available
         while success:
             # Center crop the frame to a square
-            center_cropped_frame = self.center_crop_square(frame, height, width, square_size)
+            center_cropped_frame = BaseLoader.center_crop_square(frame, height, width, square_size)
 
             # Resize the frame optionally
             if not config_preprocess.CROP_FACE.DO_CROP_FACE:
-                center_cropped_frame = self.resize(center_cropped_frame, downsample=True)
+                center_cropped_frame = BaseLoader.resize(center_cropped_frame, downsample=True)
 
             # Convert the frame from BGR to RGB format
             center_cropped_frame = cv2.cvtColor(np.array(center_cropped_frame), cv2.COLOR_BGR2RGB)
@@ -241,14 +210,13 @@ class MDMERLoader(BaseLoader):
 
             # Read the next frame
             success, frame = VidObj.read()
-            i += 1
-            print(i)
+        
         # Convert the list of frames to a NumPy array and return it
         return np.asarray(center_cropped_frames)
     
     def preprocess_ppg(self, ppg_data, resample_target_length):
         filtered_ppg_data = self.apply_filters(ppg_data)
-        
+
         # Resample the original ppg_data and the filtered ppg_data
         resampled_orig_ppg_data = self.resample_ppg(ppg_data, resample_target_length)
         resampled_filtered_ppg_data = self.resample_ppg(filtered_ppg_data, resample_target_length)
@@ -258,8 +226,9 @@ class MDMERLoader(BaseLoader):
         
         return new_ppg_data
     
+    @staticmethod
     def apply_filters(ppg_data):
-        new_ppg_data = filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=4, sampling_rate=100, order=3, filter_type='band'),
+        new_ppg_data = filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=4, sampling_rate=100, order=3, filter_type='band')
 
         return new_ppg_data
     
