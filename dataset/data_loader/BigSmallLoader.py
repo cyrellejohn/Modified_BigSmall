@@ -106,14 +106,14 @@ class MDMERLoader(BaseLoader):
     def preprocess_dataset_subprocess(self, data_dirs, config_preprocess, i, file_list_dict):
         """Invoked by preprocess_dataset for multi-process data preprocessing."""
         
-        all_colnames = []
-
         # Extract the subject path and saved filename
         subject_path = data_dirs[i]['path']
         saved_filename = data_dirs[i]['index']
 
         # Paths to the raw video, camera trigger, and raw PPG files
         subject_video = os.path.join(subject_path, "vid.mp4")
+        subject_emotion = pd.read_csv(os.path.join(subject_path, "emotion.csv"), skiprows=1, header=None).values[:, 1:]
+        subject_vad = pd.read_csv(os.path.join(subject_path, "vad.csv"), skiprows=1, header=None).values[:, 1:]
         subject_ppg = pd.read_csv(os.path.join(subject_path, "ppg.csv"), skiprows=1, header=None)
 
         # Working directory of the AUCoding from OpenFace
@@ -130,7 +130,10 @@ class MDMERLoader(BaseLoader):
         else:
             # Raise an error if DATA_AUG configuration is unsupported
             raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
-        
+
+        # Resample signals
+        combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
+        resampled_emotion = self.resample_signal_multi_column(combined_emotion, frames.shape[0])
         phys_labels = self.preprocess_ppg(subject_ppg.values[:, 3], frames.shape[0])
 
         # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
@@ -154,6 +157,7 @@ class MDMERLoader(BaseLoader):
 
         # Combine all labels
         labels = {
+            'resampled_emotion': resampled_emotion,
             'phys_labels': phys_labels,
             'psuedo_phys_labels': psuedo_phys_labels,
             'au_occ_lf': au_occ_lf,
@@ -167,16 +171,20 @@ class MDMERLoader(BaseLoader):
 
         # Save label names if required
         if self.dataset_name == "train" and i == 0:
-            combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + colnames)
+            combined_colnames = pd.Index(['amusement', 'disgust', 'arousal', 'valence', 'dominance', \
+                                          'ppg', 'filtered_ppg', 'pos_ppg'] + colnames)
             self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
         
-        # Combine all AU occurrence and intensity features
+        # Merge AU features
         au_occ_all = np.concatenate(
-            [au_occ_lf] + [openface_labels[key] for key in openface_labels if key.startswith('au_occ_of_')],
+            [au_occ_lf] + [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')],
             axis=1)
         au_int_all = np.concatenate(
-            [au_int_lf] + [openface_labels[key] for key in openface_labels if key.startswith('au_int_of_')],
+            [au_int_lf] + [v for k, v in openface_labels.items() if k.startswith('au_int_of_')],
             axis=1)
+
+        # Merge all emotion-related labels
+        all_emotion = np.concatenate([resampled_emotion, emotion_lf], axis=1)
 
         # Run full preprocessing
         big_clips, small_clips, label_clips = self.preprocess(frames, 
@@ -184,8 +192,8 @@ class MDMERLoader(BaseLoader):
                                                               psuedo_phys_labels, 
                                                               au_occ_all, 
                                                               au_int_all, 
-                                                              emotion_lf, 
-                                                              config_preprocess)                                               
+                                                              all_emotion, 
+                                                              config_preprocess)                                  
         
         # Save the processed data with its file chunks and update the file list dictionary
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
@@ -249,8 +257,8 @@ class MDMERLoader(BaseLoader):
         filtered_ppg_data = self.apply_filters(ppg_data)
 
         # Resample the original ppg_data and the filtered ppg_data
-        resampled_orig_ppg_data = self.resample_ppg(ppg_data, resample_target_length)
-        resampled_filtered_ppg_data = self.resample_ppg(filtered_ppg_data, resample_target_length)
+        resampled_orig_ppg_data = self.resample_signal(ppg_data, resample_target_length)
+        resampled_filtered_ppg_data = self.resample_signal(filtered_ppg_data, resample_target_length)
         
         # Stack the resampled original ppg_data and the resampled filtered ppg_data as columns to form a multi-column array
         new_ppg_data = np.column_stack([resampled_orig_ppg_data, resampled_filtered_ppg_data])
@@ -281,6 +289,28 @@ class MDMERLoader(BaseLoader):
         normalized_ppg = pos_ppg / amplitude_envelope 
 
         return normalized_ppg
+
+    def resample_signal_multi_column(self, data, target_length):
+        """
+        Resamples all numeric columns in a DataFrame using a provided 1D signal resampling function,
+        and returns the result as integers.
+
+        Args:
+            data (pd.DataFrame): DataFrame with numeric columns to be resampled.
+            target_length (int): The desired number of rows after resampling.
+
+        Returns:
+            pd.DataFrame: A new DataFrame with resampled numeric columns as integers.
+        """
+        if isinstance(data, np.ndarray):
+            data = pd.DataFrame(data)
+
+        resampled_data = {}
+        for col in data.columns:
+            resampled_col = self.resample_signal(data[col].values, target_length)
+            resampled_data[col] = resampled_col.astype(int)
+
+        return pd.DataFrame(resampled_data)
         
     @staticmethod
     def extract_labels_libreface(aucoding_dir):

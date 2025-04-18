@@ -945,7 +945,7 @@ class BaseLoader(Dataset):
         return count
 
     @staticmethod
-    def resample_ppg(input_signal, target_length):
+    def resample_signal(input_signal, target_length):
         """
         Resamples the input signal to a specified target length using linear interpolation.
 
