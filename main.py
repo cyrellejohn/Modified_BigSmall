@@ -218,7 +218,7 @@ if __name__ == "__main__":
         raise ValueError("Unsupported toolbox_mode! Currently support train_and_test, only_test or unsupervised_method")
     
     if config.TOOLBOX_MODE == "train_and_test":
-        run_model(config, data_loader_dict, train=True, test=True)
+        pass # run_model(config, data_loader_dict, train=True, test=True)
 
     elif config.TOOLBOX_MODE == "only_test":
         run_model(config, data_loader_dict, train=False, test=True)

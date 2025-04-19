@@ -130,7 +130,7 @@ class MDMERLoader(BaseLoader):
         else:
             # Raise an error if DATA_AUG configuration is unsupported
             raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
-
+        
         # Resample signals
         combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
         resampled_emotion = self.resample_signal_multi_column(combined_emotion, frames.shape[0])
@@ -143,17 +143,23 @@ class MDMERLoader(BaseLoader):
          
         # Extract labels from libreface
         au_occ_lf, au_int_lf, emotion_lf, *lf_colnames = self.extract_labels_libreface(libreface_dir)
-        colnames = list(lf_colnames[0]) + list(lf_colnames[1]) + list(lf_colnames[2])
+        au_occ_colnames = list(lf_colnames[0])
+        au_int_colnames = list(lf_colnames[1])
+        emotion_colnames = ['amusement', 'disgust', 'arousal', 'valence', 'dominance'] + list(lf_colnames[2])
 
         # Extract OpenFace labels with configs
-        openface_configs = ['au_dynamic', 'au_dynamic_wild', 'au_static', 'au_static_wild']
+        openface_configs = [('au_dynamic', ''),
+                            ('au_dynamic_wild', '_wild'),
+                            ('au_static', '_static'),
+                            ('au_static_wild', '_static_wild')]
         openface_labels = {}
 
-        for config in openface_configs:
-            occ, intensity, *cols = self.extract_labels_openface(openface_dir, config)
-            openface_labels[f'au_occ_of_{config}'] = occ
-            openface_labels[f'au_int_of_{config}'] = intensity
-            colnames += list(cols[0]) + list(cols[1])
+        for dir, colname in openface_configs:
+            occ, intensity, *cols = self.extract_labels_openface(openface_dir, dir, colname)
+            openface_labels[f'au_occ_of_{dir}'] = occ
+            openface_labels[f'au_int_of_{dir}'] = intensity
+            au_occ_colnames += list(cols[0]) 
+            au_int_colnames += list(cols[1])
 
         # Combine all labels
         labels = {
@@ -166,22 +172,24 @@ class MDMERLoader(BaseLoader):
             **openface_labels
         }
 
+        print(resampled_emotion.shape)
+        print(emotion_lf.shape)
+        print(frames.shape)
+        exit()
+
         mismatched = [name for name, label in labels.items() if label.shape[0] != frames.shape[0]]
         assert not mismatched, f"Shape mismatch in: {', '.join(mismatched)}. Expected shape: {frames.shape[0]}"
 
         # Save label names if required
         if self.dataset_name == "train" and i == 0:
-            combined_colnames = pd.Index(['amusement', 'disgust', 'arousal', 'valence', 'dominance', \
-                                          'ppg', 'filtered_ppg', 'pos_ppg'] + colnames)
+            combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + au_occ_colnames + au_int_colnames + emotion_colnames)
             self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
-        
+
         # Merge AU features
-        au_occ_all = np.concatenate(
-            [au_occ_lf] + [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')],
-            axis=1)
-        au_int_all = np.concatenate(
-            [au_int_lf] + [v for k, v in openface_labels.items() if k.startswith('au_int_of_')],
-            axis=1)
+        au_occ_all = np.concatenate([au_occ_lf] + \
+                                    [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')], axis=1)
+        au_int_all = np.concatenate([au_int_lf] + \
+                                    [v for k, v in openface_labels.items() if k.startswith('au_int_of_')], axis=1)
 
         # Merge all emotion-related labels
         all_emotion = np.concatenate([resampled_emotion, emotion_lf], axis=1)
@@ -193,14 +201,13 @@ class MDMERLoader(BaseLoader):
                                                               au_occ_all, 
                                                               au_int_all, 
                                                               all_emotion, 
-                                                              config_preprocess)                                  
+                                                              config_preprocess)                               
         
         # Save the processed data with its file chunks and update the file list dictionary
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
         file_list_dict[i] = input_name_list
     
-    @staticmethod
-    def read_video(video_file, config_preprocess):
+    def read_video(self, video_file, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
         
@@ -232,11 +239,11 @@ class MDMERLoader(BaseLoader):
         # Loop to read frames until no more frames are available
         while success:
             # Center crop the frame to a square
-            center_cropped_frame = BaseLoader.center_crop_square(frame, height, width, square_size)
+            center_cropped_frame = self.center_crop_square(frame, height, width, square_size)
 
             # Resize the frame optionally
             if not config_preprocess.CROP_FACE.DO_CROP_FACE:
-                center_cropped_frame = BaseLoader.resize(center_cropped_frame, downsample=True)
+                center_cropped_frame = self.resize(center_cropped_frame, downsample=True)
 
             # Convert the frame from BGR to RGB format
             center_cropped_frame = cv2.cvtColor(np.array(center_cropped_frame), cv2.COLOR_BGR2RGB)
@@ -340,6 +347,10 @@ class MDMERLoader(BaseLoader):
         au_int = df.filter(regex=r'^au_\d+_intensity$')
         emotion = df.filter(like='facial_expression')
 
+        au_occ.columns = au_occ.columns.str.replace(r'^au_(\d+)$', r'AU\1_lf', regex=True)
+        au_int.columns = au_int.columns.str.replace(r'^au_(\d+)_intensity$', r'AU\1_int_lf', regex=True)
+        emotion.columns = ['emotion_lf']
+
         return (
             au_occ,
             au_int,
@@ -350,8 +361,8 @@ class MDMERLoader(BaseLoader):
         )
 
     @staticmethod
-    def extract_labels_openface(aucoding_dir, variation):
-        full_path = os.path.join(aucoding_dir, variation, "full_output.csv")
+    def extract_labels_openface(aucoding_dir, dir, colname):
+        full_path = os.path.join(aucoding_dir, dir, "full_output.csv")
 
         try:
             with open(full_path, 'r') as f:
@@ -370,10 +381,10 @@ class MDMERLoader(BaseLoader):
         au_occ = df.filter(like='_c')
         au_int = df.filter(like='_r')
 
-        au_occ_colname = au_occ.columns.str.replace('_c', f'_occ_{variation}')
-        au_int_colname = au_int.columns.str.replace('_r', f'_int_{variation}')
+        au_occ.columns = au_occ.columns.str.replace('_c', f'_of{colname}')
+        au_int.columns = au_int.columns.str.replace('_r', f'_int_of{colname}')
 
-        return au_occ, au_int, au_occ_colname, au_int_colname
+        return au_occ, au_int, au_occ.columns, au_int.columns
 
     @staticmethod
     def save_label_names(data, label_list_path):
@@ -417,9 +428,9 @@ class MDMERLoader(BaseLoader):
             if data_type == "Raw":
                 big_data.append(f_c) # Append raw frames
             elif data_type == "DiffNormalized":
-                big_data.append(BaseLoader.diff_normalize_data(f_c)) # Apply difference normalization
+                big_data.append(self.diff_normalize_data(f_c)) # Apply difference normalization
             elif data_type == "Standardized":
-                big_data.append(BaseLoader.standardized_data(f_c)) # Apply standardization
+                big_data.append(self.standardized_data(f_c)) # Apply standardization
             else:
                 raise ValueError("Unsupported data type!") # Raise error for unsupported data types
         big_data = np.concatenate(big_data, axis=-1) # Concatenate transformed data along the last axis
@@ -432,9 +443,9 @@ class MDMERLoader(BaseLoader):
             if data_type == "Raw":
                 small_data.append(f_c) # Append raw frames
             elif data_type == "DiffNormalized":
-                small_data.append(BaseLoader.diff_normalize_data(f_c)) # Apply difference normalization
+                small_data.append(self.diff_normalize_data(f_c)) # Apply difference normalization
             elif data_type == "Standardized":
-                small_data.append(BaseLoader.standardized_data(f_c)) # Apply standardization
+                small_data.append(self.standardized_data(f_c)) # Apply standardization
             else:
                 raise ValueError("Unsupported data type!") # Raise error for unsupported data types
         small_data = np.concatenate(small_data, axis=-1) # Concatenate transformed data along the last axis
@@ -464,13 +475,13 @@ class MDMERLoader(BaseLoader):
         if config_preprocess.LABEL_TYPE == "Raw":
             pass
         elif config_preprocess.LABEL_TYPE == "DiffNormalized":
-            ppg = BaseLoader.diff_normalize_label(ppg)
-            filtered_ppg = BaseLoader.diff_normalize_label(filtered_ppg)
-            psuedo_phys_labels = BaseLoader.diff_normalize_label(psuedo_phys_labels)
+            ppg = self.diff_normalize_label(ppg)
+            filtered_ppg = self.diff_normalize_label(filtered_ppg)
+            psuedo_phys_labels = self.diff_normalize_label(psuedo_phys_labels)
         elif config_preprocess.LABEL_TYPE == "Standardized":
-            ppg = BaseLoader.standardized_label(ppg)
-            filtered_ppg = BaseLoader.standardized_label(filtered_ppg)
-            psuedo_phys_labels = BaseLoader.standardized_label(psuedo_phys_labels)
+            ppg = self.standardized_label(ppg)
+            filtered_ppg = self.standardized_label(filtered_ppg)
+            psuedo_phys_labels = self.standardized_label(psuedo_phys_labels)
         else:
             raise ValueError("Unsupported label type!")
 
@@ -876,8 +887,7 @@ class UBFCrPPGLoader(BaseLoader):
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
         file_list_dict[i] = input_name_list
 
-    @staticmethod
-    def read_video(video_file, config_preprocess):
+    def read_video(self, video_file, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
         
@@ -909,11 +919,11 @@ class UBFCrPPGLoader(BaseLoader):
         # Loop to read frames until no more frames are available
         while success:
             # Center crop the frame to a square
-            center_cropped_frame = BaseLoader.center_crop_square(frame, height, width, square_size)
+            center_cropped_frame = self.center_crop_square(frame, height, width, square_size)
 
             # Resize the frame optionally
             if not config_preprocess.CROP_FACE.DO_CROP_FACE:
-                center_cropped_frame = BaseLoader.resize(center_cropped_frame, downsample=True)
+                center_cropped_frame = self.resize(center_cropped_frame, downsample=True)
 
             # Convert the frame from BGR to RGB format
             center_cropped_frame = cv2.cvtColor(np.array(center_cropped_frame), cv2.COLOR_BGR2RGB)
@@ -989,9 +999,9 @@ class UBFCrPPGLoader(BaseLoader):
             if data_type == "Raw":
                 big_data.append(f_c) # Append raw frames
             elif data_type == "DiffNormalized":
-                big_data.append(BaseLoader.diff_normalize_data(f_c)) # Apply difference normalization
+                big_data.append(self.diff_normalize_data(f_c)) # Apply difference normalization
             elif data_type == "Standardized":
-                big_data.append(BaseLoader.standardized_data(f_c)) # Apply standardization
+                big_data.append(self.standardized_data(f_c)) # Apply standardization
             else:
                 raise ValueError("Unsupported data type!") # Raise error for unsupported data types
         big_data = np.concatenate(big_data, axis=-1) # Concatenate transformed data along the last axis
@@ -1004,9 +1014,9 @@ class UBFCrPPGLoader(BaseLoader):
             if data_type == "Raw":
                 small_data.append(f_c) # Append raw frames
             elif data_type == "DiffNormalized":
-                small_data.append(BaseLoader.diff_normalize_data(f_c)) # Apply difference normalization
+                small_data.append(self.diff_normalize_data(f_c)) # Apply difference normalization
             elif data_type == "Standardized":
-                small_data.append(BaseLoader.standardized_data(f_c)) # Apply standardization
+                small_data.append(self.standardized_data(f_c)) # Apply standardization
             else:
                 raise ValueError("Unsupported data type!") # Raise error for unsupported data types
         small_data = np.concatenate(small_data, axis=-1) # Concatenate transformed data along the last axis
@@ -1033,11 +1043,11 @@ class UBFCrPPGLoader(BaseLoader):
         if config_preprocess.LABEL_TYPE == "Raw":
             pass
         elif config_preprocess.LABEL_TYPE == "DiffNormalized":
-            phys_labels = BaseLoader.diff_normalize_label(phys_labels)
-            psuedo_phys_labels = BaseLoader.diff_normalize_label(psuedo_phys_labels)
+            phys_labels = self.diff_normalize_label(phys_labels)
+            psuedo_phys_labels = self.diff_normalize_label(psuedo_phys_labels)
         elif config_preprocess.LABEL_TYPE == "Standardized":
-            phys_labels = BaseLoader.standardized_label(phys_labels)
-            psuedo_phys_labels = BaseLoader.standardized_label(psuedo_phys_labels)
+            phys_labels = self.standardized_label(phys_labels)
+            psuedo_phys_labels = self.standardized_label(psuedo_phys_labels)
         else:
             raise ValueError("Unsupported label type!")
 
