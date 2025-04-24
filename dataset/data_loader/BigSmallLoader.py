@@ -131,9 +131,7 @@ class MDMERLoader(BaseLoader):
             # Raise an error if DATA_AUG configuration is unsupported
             raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
         
-        # Resample signals
         combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
-        resampled_emotion = self.resample_signal_multi_column(combined_emotion, frames.shape[0])
         phys_labels = self.preprocess_ppg(subject_ppg.values[:, 3], frames.shape[0])
 
         # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
@@ -163,7 +161,7 @@ class MDMERLoader(BaseLoader):
 
         # Combine all labels
         labels = {
-            'resampled_emotion': resampled_emotion,
+            'combined_emotion': combined_emotion,
             'phys_labels': phys_labels,
             'psuedo_phys_labels': psuedo_phys_labels,
             'au_occ_lf': au_occ_lf,
@@ -172,13 +170,8 @@ class MDMERLoader(BaseLoader):
             **openface_labels
         }
 
-        print(resampled_emotion.shape)
-        print(emotion_lf.shape)
-        print(frames.shape)
-        exit()
-
         mismatched = [name for name, label in labels.items() if label.shape[0] != frames.shape[0]]
-        assert not mismatched, f"Shape mismatch in: {', '.join(mismatched)}. Expected shape: {frames.shape[0]}"
+        assert not mismatched, f"{saved_filename} Shape mismatch in: {', '.join(mismatched)}. Expected shape: {frames.shape[0]}"
 
         # Save label names if required
         if self.dataset_name == "train" and i == 0:
@@ -192,7 +185,7 @@ class MDMERLoader(BaseLoader):
                                     [v for k, v in openface_labels.items() if k.startswith('au_int_of_')], axis=1)
 
         # Merge all emotion-related labels
-        all_emotion = np.concatenate([resampled_emotion, emotion_lf], axis=1)
+        all_emotion = np.concatenate([combined_emotion, emotion_lf], axis=1)
 
         # Run full preprocessing
         big_clips, small_clips, label_clips = self.preprocess(frames, 
@@ -296,32 +289,11 @@ class MDMERLoader(BaseLoader):
         normalized_ppg = pos_ppg / amplitude_envelope 
 
         return normalized_ppg
-
-    def resample_signal_multi_column(self, data, target_length):
-        """
-        Resamples all numeric columns in a DataFrame using a provided 1D signal resampling function,
-        and returns the result as integers.
-
-        Args:
-            data (pd.DataFrame): DataFrame with numeric columns to be resampled.
-            target_length (int): The desired number of rows after resampling.
-
-        Returns:
-            pd.DataFrame: A new DataFrame with resampled numeric columns as integers.
-        """
-        if isinstance(data, np.ndarray):
-            data = pd.DataFrame(data)
-
-        resampled_data = {}
-        for col in data.columns:
-            resampled_col = self.resample_signal(data[col].values, target_length)
-            resampled_data[col] = resampled_col.astype(int)
-
-        return pd.DataFrame(resampled_data)
         
     @staticmethod
     def extract_labels_libreface(aucoding_dir):
-        full_path = os.path.join(aucoding_dir, "full_output.csv")
+        full_output_processed = os.path.join(aucoding_dir, "full_output_processed.csv")
+        full_path = full_output_processed if os.path.exists(full_output_processed) else os.path.join(aucoding_dir, "full_output.csv")
 
         # Step 1: Read the header line
         try:
