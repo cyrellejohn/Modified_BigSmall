@@ -2,6 +2,7 @@ import glob
 import zipfile
 import os
 import re
+from pathlib import Path
 
 import cv2
 # from skimage.util import img_as_float
@@ -138,7 +139,7 @@ class MDMERLoader(BaseLoader):
         psuedo_phys_labels = None
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
             psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
-         
+
         # Extract labels from libreface
         au_occ_lf, au_int_lf, emotion_lf, *lf_colnames = self.extract_labels_libreface(libreface_dir)
         au_occ_colnames = list(lf_colnames[0])
@@ -194,7 +195,7 @@ class MDMERLoader(BaseLoader):
                                                               au_occ_all, 
                                                               au_int_all, 
                                                               all_emotion, 
-                                                              config_preprocess)                               
+                                                              config_preprocess)                             
         
         # Save the processed data with its file chunks and update the file list dictionary
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
@@ -203,169 +204,177 @@ class MDMERLoader(BaseLoader):
     def read_video(self, video_file, config_preprocess):
         """
         Reads a video file and returns its frames as a NumPy array in RGB format.
-        
-        Args:
-            video_file (str): The path to the video file to be read.
-        
-        Returns:
-            np.ndarray: A NumPy array of shape (T, H, W, 3) containing the video frames,
-                        where T is the number of frames, H is the height, W is the width,
-                        and 3 represents the RGB color channels.
-        """
-        # Initialize a VideoCapture object to read the video file
-        VidObj = cv2.VideoCapture(video_file)
 
-        # Get the height and width of the video
+        Args:
+            video_file (str): Path to the video file.
+            config_preprocess: Preprocessing configuration object.
+
+        Returns:
+            np.ndarray: Array of shape (T, H, W, 3) with RGB frames.
+        """
+        VidObj = cv2.VideoCapture(video_file)
+        if not VidObj.isOpened():
+            raise IOError(f"Cannot open video file: {video_file}")
+
         height = int(VidObj.get(cv2.CAP_PROP_FRAME_HEIGHT))
         width = int(VidObj.get(cv2.CAP_PROP_FRAME_WIDTH))
-        square_size = min(height, width)  # Determine the square size
+        square_size = min(height, width)
         
-        # Set the video position to the start (0 milliseconds)
         VidObj.set(cv2.CAP_PROP_POS_MSEC, 0)
 
-        # Read the first frame from the video
-        success, frame = VidObj.read()
+        do_crop_face = config_preprocess.CROP_FACE.DO_CROP_FACE
+        center_cropped_frames = []
 
-        # Initialize a list to store the center cropped frames
-        center_cropped_frames = list()
-
-        # Loop to read frames until no more frames are available
-        while success:
-            # Center crop the frame to a square
-            center_cropped_frame = self.center_crop_square(frame, height, width, square_size)
-
-            # Resize the frame optionally
-            if not config_preprocess.CROP_FACE.DO_CROP_FACE:
-                center_cropped_frame = self.resize(center_cropped_frame, downsample=True)
-
-            # Convert the frame from BGR to RGB format
-            center_cropped_frame = cv2.cvtColor(np.array(center_cropped_frame), cv2.COLOR_BGR2RGB)
-
-            # Convert the frame to a NumPy array
-            center_cropped_frame = np.asarray(center_cropped_frame)
-
-            # Append the frame to the center crop frames list
-            center_cropped_frames.append(center_cropped_frame)
-
-            # Read the next frame
+        while True:
             success, frame = VidObj.read()
-        
-        # Convert the list of frames to a NumPy array and return it
-        return np.asarray(center_cropped_frames)
+            if not success:
+                break
+
+            frame = self.center_crop_square(frame, height, width, square_size)
+            if not do_crop_face:
+                frame = self.resize(frame, downsample=True)
+
+            # Convert from BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            center_cropped_frames.append(frame_rgb)
+
+        VidObj.release()
+        return np.array(center_cropped_frames)
     
     def preprocess_ppg(self, ppg_data, resample_target_length):
-        filtered_ppg_data = self.apply_filters(ppg_data)
+        """Applies filtering and resampling to PPG data, returns stacked result."""
 
-        # Resample the original ppg_data and the filtered ppg_data
-        resampled_orig_ppg_data = self.resample_signal(ppg_data, resample_target_length)
-        resampled_filtered_ppg_data = self.resample_signal(filtered_ppg_data, resample_target_length)
-        
-        # Stack the resampled original ppg_data and the resampled filtered ppg_data as columns to form a multi-column array
-        new_ppg_data = np.column_stack([resampled_orig_ppg_data, resampled_filtered_ppg_data])
-        
-        return new_ppg_data
+        # Apply filters once
+        filtered = self.apply_filters(ppg_data)
+
+        # Resample both original and filtered data
+        resampled = [self.resample_signal(signal, resample_target_length)
+                     for signal in (ppg_data, filtered)]
+
+        # Stack the resampled signals as columns
+        return np.column_stack(resampled)
     
     @staticmethod
     def apply_filters(ppg_data):
-        new_ppg_data = filters.butter_filter(ppg_data, low_cutoff=0.5, high_cutoff=4, sampling_rate=100, order=3, filter_type='band')
+        """Applies a bandpass Butterworth filter to the PPG data."""
 
-        return new_ppg_data
+        return filters.butter_filter(ppg_data, 
+                                     low_cutoff=0.5,
+                                     high_cutoff=4.0,
+                                     sampling_rate=100,
+                                     order=3,
+                                     filter_type='band')
     
     def generate_pos_ppg(self, frames, fps=30):
+        """
+        Generates a normalized PPG signal using the POS_WANG method from the input video frames.
+
+        Args:
+            frames (np.ndarray): Video frames array of shape (T, H, W, C).
+            fps (int): Frames per second of the video.
+
+        Returns:
+            np.ndarray: Normalized PPG signal.
+        """
+        # Generate the raw POS PPG signal
         pos_ppg = POS.POS_WANG(frames, fps)
 
         # TODO: Optional: Apply detrending but check first if there is a baseline drift
 
-        # Apply filters to the POS PPG signal
-        pos_ppg = self.apply_filters(pos_ppg)
+        # Apply bandpass filtering to isolate physiological frequencies
+        filtered_ppg = self.apply_filters(pos_ppg)
 
-        # Compute the Hilbert transform to obtain the analytic signal
-        analytic_signal = signal.hilbert(pos_ppg) 
+        # Compute the analytic signal using the Hilbert transform
+        analytic_signal = signal.hilbert(filtered_ppg)
 
-        # Calculate the amplitude envelope of the analytic signal
+        # Compute the amplitude envelope (instantaneous magnitude)
         amplitude_envelope = np.abs(analytic_signal)
 
-        # Normalize the PPG signal by its amplitude envelope
-        normalized_ppg = pos_ppg / amplitude_envelope 
+        # Avoid division by zero (or near-zero values)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            normalized_ppg = np.divide(filtered_ppg, amplitude_envelope)
+            normalized_ppg[~np.isfinite(normalized_ppg)] = 0  # set inf or NaN to 0
 
         return normalized_ppg
         
     @staticmethod
     def extract_labels_libreface(aucoding_dir):
-        full_output_processed = os.path.join(aucoding_dir, "full_output_processed.csv")
-        full_path = full_output_processed if os.path.exists(full_output_processed) else os.path.join(aucoding_dir, "full_output.csv")
+        # Locate the correct file
+        for fname in ("full_output_processed.csv", "full_output.csv"):
+            full_path = os.path.join(aucoding_dir, fname)
+            if os.path.exists(full_path):
+                break
+        else:
+            raise FileNotFoundError(f"No suitable CSV file found in {aucoding_dir}")
 
-        # Step 1: Read the header line
-        try:
-            with open(full_path, 'r') as f:
-                all_columns = f.readline().strip().split(',')
-        except FileNotFoundError:
-            raise FileNotFoundError(f"CSV file not found at path: {full_path}")
+        # Define known AU columns and emotion
+        au_occ_cols = [f'au_{i}' for i in [1, 2, 4, 6, 7, 10, 12, 14, 15, 17, 23, 24]]
+        au_int_cols = [f'au_{i}_intensity' for i in [1, 2, 4, 5, 6, 9, 12, 15, 17, 20, 25, 26]]
+        emotion_col = ['facial_expression']
 
-        # Step 2: Find the index of the column named exactly 'au_1'
-        try:
-            start_index = all_columns.index('au_1')
-        except ValueError:
-            raise ValueError("'au_1' column not found in CSV header.")
+        # Columns to load
+        usecols = au_occ_cols + au_int_cols + emotion_col
+        df = pd.read_csv(full_path, usecols=usecols)
 
-        # Step 3: Slice from 'au_1' onward
-        important_columns = all_columns[start_index:]
+        # Extract column groups
+        au_occ = df[au_occ_cols]
+        au_int = df[au_int_cols]
+        emotion = df[emotion_col]
 
-        # Step 4: Load only those columns
-        df = pd.read_csv(full_path, usecols=important_columns)
-
-        # Step 5: Split into AU occurrence, AU intensity, and emotion
-        au_occ = df.filter(regex=r'^au_\d+$')
-        au_int = df.filter(regex=r'^au_\d+_intensity$')
-        emotion = df.filter(like='facial_expression')
-
-        au_occ.columns = au_occ.columns.str.replace(r'^au_(\d+)$', r'AU\1_lf', regex=True)
-        au_int.columns = au_int.columns.str.replace(r'^au_(\d+)_intensity$', r'AU\1_int_lf', regex=True)
-        emotion.columns = ['emotion_lf']
+        # Create renamed versions of columns (stored separately, not assigned)
+        au_occ_column_names = [f'AU{col[3:]}_lf' for col in au_occ_cols]
+        au_int_column_names = [f'AU{col[3:-10]}_int_lf' for col in au_int_cols]
+        emotion_column_name = ['emotion_lf']
 
         return (
             au_occ,
             au_int,
             emotion,
-            au_occ.columns,
-            au_int.columns,
-            emotion.columns
+            au_occ_column_names,
+            au_int_column_names,
+            emotion_column_name
         )
 
     @staticmethod
-    def extract_labels_openface(aucoding_dir, dir, colname):
-        full_path = os.path.join(aucoding_dir, dir, "full_output.csv")
+    def extract_labels_openface(aucoding_dir, dir_name, colname):
+        full_path = os.path.join(aucoding_dir, dir_name, "full_output.csv")
 
-        try:
-            with open(full_path, 'r') as f:
-                all_columns = f.readline().strip().split(',')
-        except FileNotFoundError:
+        if not os.path.exists(full_path):
             raise FileNotFoundError(f"CSV file not found at path: {full_path}")
 
-        try:
-            start_index = all_columns.index('AU01_r')
-        except ValueError:
-            raise ValueError("'AU01_r' column not found in CSV header.")
+        # Define AU column names
+        au_intensity_cols = ["AU01_r", "AU02_r", "AU04_r", "AU05_r", "AU06_r", "AU07_r", "AU09_r",
+                             "AU10_r", "AU12_r", "AU14_r", "AU15_r", "AU17_r", "AU20_r",
+                             "AU23_r", "AU25_r", "AU26_r", "AU45_r"]
 
-        important_columns = all_columns[start_index:]
-        df = pd.read_csv(full_path, usecols=important_columns)
+        au_occurrence_cols = ["AU01_c", "AU02_c", "AU04_c", "AU05_c", "AU06_c", "AU07_c", "AU09_c",
+                              "AU10_c", "AU12_c", "AU14_c", "AU15_c", "AU17_c", "AU20_c",
+                              "AU23_c", "AU25_c", "AU26_c", "AU28_c", "AU45_c"]
 
-        au_occ = df.filter(like='_c')
-        au_int = df.filter(like='_r')
+        # Read only needed columns
+        usecols = au_intensity_cols + au_occurrence_cols
+        df = pd.read_csv(full_path, usecols=usecols)
 
-        au_occ.columns = au_occ.columns.str.replace('_c', f'_of{colname}')
-        au_int.columns = au_int.columns.str.replace('_r', f'_int_of{colname}')
+        # Get slices
+        au_int = df[au_intensity_cols]
+        au_occ = df[au_occurrence_cols]
 
-        return au_occ, au_int, au_occ.columns, au_int.columns
+        # Generate renamed column names (don't change DataFrame)
+        au_int_column_names = [col.replace('_r', f'_int_of{colname}') for col in au_intensity_cols]
+        au_occ_column_names = [col.replace('_c', f'_of{colname}') for col in au_occurrence_cols]
+
+        return au_occ, au_int, au_occ_column_names, au_int_column_names
 
     @staticmethod
     def save_label_names(data, label_list_path):
+        # Ensure the output directory exists
+        os.makedirs(label_list_path, exist_ok=True)
+
         full_path = os.path.join(label_list_path, "label_list.txt")
 
-        # Overwrite the file instead of appending to avoid duplication
+        # Efficiently write all labels at once
         with open(full_path, "w") as file:
-            for column in data:  # Iterate directly over Index
-                file.write(f"{column.strip()}\n")  # Strip leading/trailing spaces
+            file.write('\n'.join(data) + '\n')
 
     def load_label_names(label_list_path):
         full_path = os.path.join(label_list_path, "label_list.txt")
@@ -377,106 +386,94 @@ class MDMERLoader(BaseLoader):
 
     def preprocess(self, frames, phys_labels, psuedo_phys_labels, au_occ, au_int, emotion, config_preprocess):
         ##########################################
+        ########## NESTED HELPER FUNCTIONS #######
+        ##########################################
+
+        # Helper to ensure arrays are 2D (e.g., (N,) -> (N,1))
+        def to_2d(arr):
+            return arr.reshape(-1, 1) if arr.ndim == 1 else arr
+
+        # Helper to generate transformed video data for BIG/SMALL path
+        def generate_data(data_types):
+            return np.concatenate([
+                frames if dtype == "Raw"
+                else self.diff_normalize_data(frames) if dtype == "DiffNormalized"
+                else self.standardized_data(frames) if dtype == "Standardized"
+                else (_ for _ in ()).throw(ValueError(f"Unsupported data type: {dtype}"))
+                for dtype in data_types
+            ], axis=-1)
+
+        ##########################################
         ########## PREPROCESSING FRAMES ##########
         ##########################################
 
-        # CROP FACE AND RESIZE FRAMES
-        if config_preprocess.CROP_FACE.DO_CROP_FACE:
+        crop_cfg = config_preprocess.CROP_FACE
+        resize_cfg = config_preprocess.BIGSMALL.RESIZE
+        big_types = config_preprocess.BIGSMALL.BIG_DATA_TYPE
+        small_types = config_preprocess.BIGSMALL.SMALL_DATA_TYPE
+
+        # Step 1: Crop and resize if enabled
+        if crop_cfg.DO_CROP_FACE:
             frames = self.crop_face_resize(frames,
-                                           config_preprocess.CROP_FACE.BACKEND,
-                                           config_preprocess.CROP_FACE.USE_LARGE_FACE_BOX,
-                                           config_preprocess.CROP_FACE.LARGE_BOX_COEF,
-                                           config_preprocess.CROP_FACE.DETECTION.DO_DYNAMIC_DETECTION,
-                                           config_preprocess.CROP_FACE.DETECTION.DYNAMIC_DETECTION_FREQUENCY,
-                                           config_preprocess.CROP_FACE.DETECTION.USE_MEDIAN_FACE_BOX,
-                                           config_preprocess.BIGSMALL.RESIZE.BIG_W,
-                                           config_preprocess.BIGSMALL.RESIZE.BIG_H)
+                                           crop_cfg.BACKEND,
+                                           crop_cfg.USE_LARGE_FACE_BOX,
+                                           crop_cfg.LARGE_BOX_COEF,
+                                           crop_cfg.DETECTION.DO_DYNAMIC_DETECTION,
+                                           crop_cfg.DETECTION.DYNAMIC_DETECTION_FREQUENCY,
+                                           crop_cfg.DETECTION.USE_MEDIAN_FACE_BOX,
+                                           resize_cfg.BIG_W,
+                                           resize_cfg.BIG_H)
 
-        # PREPROCESS VIDEO DATA FOR BIG PATH
-        big_data = list()
-        for data_type in config_preprocess.BIGSMALL.BIG_DATA_TYPE:
-            f_c = frames.copy() # Copy frames to avoid modifying original data
+        # Step 2: Generate big and small path data
+        big_data = generate_data(big_types)
+        small_data = generate_data(small_types)
 
-            if data_type == "Raw":
-                big_data.append(f_c) # Append raw frames
-            elif data_type == "DiffNormalized":
-                big_data.append(self.diff_normalize_data(f_c)) # Apply difference normalization
-            elif data_type == "Standardized":
-                big_data.append(self.standardized_data(f_c)) # Apply standardization
-            else:
-                raise ValueError("Unsupported data type!") # Raise error for unsupported data types
-        big_data = np.concatenate(big_data, axis=-1) # Concatenate transformed data along the last axis
-
-        # PREPROCESS VIDEO DATA FOR SMALL PATH
-        small_data = list()
-        for data_type in config_preprocess.BIGSMALL.SMALL_DATA_TYPE:
-            f_c = frames.copy() # Copy frames to avoid modifying original data
-
-            if data_type == "Raw":
-                small_data.append(f_c) # Append raw frames
-            elif data_type == "DiffNormalized":
-                small_data.append(self.diff_normalize_data(f_c)) # Apply difference normalization
-            elif data_type == "Standardized":
-                small_data.append(self.standardized_data(f_c)) # Apply standardization
-            else:
-                raise ValueError("Unsupported data type!") # Raise error for unsupported data types
-        small_data = np.concatenate(small_data, axis=-1) # Concatenate transformed data along the last axis
-
-        # RESIZE FRAMES TO SMALL SIZE: 9x9 AT DEFAULT
+        # Step 3: Resize small data
         small_data = self.crop_face_resize(small_data,
-                                           config_preprocess.CROP_FACE.DO_CROP_FACE,
-                                           config_preprocess.CROP_FACE.BACKEND,
-                                           config_preprocess.CROP_FACE.USE_LARGE_FACE_BOX,
-                                           config_preprocess.CROP_FACE.LARGE_BOX_COEF,
-                                           config_preprocess.CROP_FACE.DETECTION.DO_DYNAMIC_DETECTION,
-                                           config_preprocess.CROP_FACE.DETECTION.DYNAMIC_DETECTION_FREQUENCY,
-                                           config_preprocess.CROP_FACE.DETECTION.USE_MEDIAN_FACE_BOX,
-                                           config_preprocess.BIGSMALL.RESIZE.SMALL_W,
-                                           config_preprocess.BIGSMALL.RESIZE.SMALL_H)
-
+                                           crop_cfg.DO_CROP_FACE,
+                                           crop_cfg.BACKEND,
+                                           crop_cfg.USE_LARGE_FACE_BOX,
+                                           crop_cfg.LARGE_BOX_COEF,
+                                           crop_cfg.DETECTION.DO_DYNAMIC_DETECTION,
+                                           crop_cfg.DETECTION.DYNAMIC_DETECTION_FREQUENCY,
+                                           crop_cfg.DETECTION.USE_MEDIAN_FACE_BOX,
+                                           resize_cfg.SMALL_W,
+                                           resize_cfg.SMALL_H)
 
         ##########################################
         ########## PREPROCESSING LABELS ##########
         ##########################################
 
-        ppg = phys_labels[:, 0]
-        filtered_ppg = phys_labels[:, 1]
+        ppg, filtered_ppg = phys_labels[:, 0], phys_labels[:, 1]
+        label_type = config_preprocess.LABEL_TYPE
 
-        # TODO: REMOVING OUTLIERS
+        label_transform = {"Raw": lambda x: x,
+                           "DiffNormalized": self.diff_normalize_label,
+                           "Standardized": self.standardized_label
+                           }.get(label_type)
 
-        if config_preprocess.LABEL_TYPE == "Raw":
-            pass
-        elif config_preprocess.LABEL_TYPE == "DiffNormalized":
-            ppg = self.diff_normalize_label(ppg)
-            filtered_ppg = self.diff_normalize_label(filtered_ppg)
-            psuedo_phys_labels = self.diff_normalize_label(psuedo_phys_labels)
-        elif config_preprocess.LABEL_TYPE == "Standardized":
-            ppg = self.standardized_label(ppg)
-            filtered_ppg = self.standardized_label(filtered_ppg)
-            psuedo_phys_labels = self.standardized_label(psuedo_phys_labels)
-        else:
-            raise ValueError("Unsupported label type!")
+        if label_transform is None:
+            raise ValueError(f"Unsupported label type: {label_type}")
 
+        ppg = label_transform(ppg)
+        filtered_ppg = label_transform(filtered_ppg)
+        psuedo_phys_labels = label_transform(psuedo_phys_labels)
 
-        ######################################
-        ##########  COMBINE LABELS ###########
-        ######################################
+        ##########################################
+        ########## COMBINE ALL LABELS ############
+        ##########################################
 
-        # If ppg, filtered_ppg, and psuedo_phys_labels is 1D, reshape it to 2D with one column
-        if ppg.ndim == 1:
-            ppg = ppg.reshape(-1, 1)
-        if filtered_ppg.ndim == 1:
-            filtered_ppg = filtered_ppg.reshape(-1, 1)
-        if psuedo_phys_labels.ndim == 1:
-            psuedo_phys_labels = psuedo_phys_labels.reshape(-1, 1)
+        labels = np.concatenate([to_2d(ppg),
+                                 to_2d(filtered_ppg),
+                                 to_2d(psuedo_phys_labels),
+                                 au_occ,
+                                 au_int,
+                                 emotion], axis=1)
 
-        labels = np.concatenate((ppg, filtered_ppg, psuedo_phys_labels, au_occ, au_int, emotion), axis=1)
+        ##########################################
+        ########## CHUNK IF REQUIRED #############
+        ##########################################
 
-        ######################################
-        ######## CHUNK DATA / LABELS #########
-        ######################################
-
-        # Chunk data and labels into smaller segments
         if config_preprocess.DO_CHUNK:
             chunk_len = config_preprocess.CHUNK_LENGTH
             big_clips, small_clips, labels_clips = self.chunk(big_data, small_data, labels, chunk_len)
@@ -485,7 +482,6 @@ class MDMERLoader(BaseLoader):
             small_clips = np.array([small_data])
             labels_clips = np.array([labels])
 
-        # Return processed video frames and labels
         return big_clips, small_clips, labels_clips
 
     def chunk(self, big_frames, small_frames, labels, chunk_len):
@@ -493,28 +489,26 @@ class MDMERLoader(BaseLoader):
         Splits the input video frames and corresponding labels into fixed-length chunks.
 
         Args:
-            big_frames (np.array): The array of big video frames to be chunked.
-            small_frames (np.array): The array of small video frames to be chunked.
-            labels (np.array): The array of labels to be chunked.
-            chunk_length (int): The length of each chunk.
+            big_frames (np.ndarray): Array of big video frames to be chunked.
+            small_frames (np.ndarray): Array of small video frames to be chunked.
+            labels (np.ndarray): Array of labels to be chunked.
+            chunk_len (int): Length of each chunk.
 
         Returns:
             tuple: A tuple containing three numpy arrays:
-                - big_clips (np.array): Chunks of big video frames.
-                - small_clips (np.array): Chunks of small video frames.
-                - labels_clips (np.array): Chunks of labels.
+                - big_clips (np.ndarray): Chunks of big video frames.
+                - small_clips (np.ndarray): Chunks of small video frames.
+                - labels_clips (np.ndarray): Chunks of labels.
         """
+        total_chunks = labels.shape[0] // chunk_len
+        if total_chunks == 0:
+            return np.empty((0, chunk_len, *big_frames.shape[1:])), \
+                np.empty((0, chunk_len, *small_frames.shape[1:])), \
+                np.empty((0, chunk_len, *labels.shape[1:]))
 
-        # Calculate the number of complete chunks that can be created
-        clip_num = labels.shape[0] // chunk_len
-        
-        # Create chunks of frames and BVP signals
-        big_clips, small_clips, labels_clips = map(np.array, zip(*[
-            (big_frames[i * chunk_len:(i + 1) * chunk_len], 
-            small_frames[i * chunk_len:(i + 1) * chunk_len], 
-            labels[i * chunk_len:(i + 1) * chunk_len]) 
-            for i in range(clip_num)
-        ]))
+        big_clips = big_frames[:total_chunks * chunk_len].reshape(total_chunks, chunk_len, *big_frames.shape[1:])
+        small_clips = small_frames[:total_chunks * chunk_len].reshape(total_chunks, chunk_len, *small_frames.shape[1:])
+        labels_clips = labels[:total_chunks * chunk_len].reshape(total_chunks, chunk_len, *labels.shape[1:])
 
         return big_clips, small_clips, labels_clips
 
@@ -531,36 +525,31 @@ class MDMERLoader(BaseLoader):
         Returns:
             tuple: Two lists containing the paths of the saved input and label files, respectively.
         """
-        # Ensure the cached path directory exists
-        os.makedirs(self.cached_path, exist_ok=True)
+        cached_path = self.cached_path
+        os.makedirs(cached_path, exist_ok=True)
 
-        # Ensure the number of inputs matches the number of labels
-        assert len(big_clips) == len(small_clips) == len(label_clips), \
-            f"Mismatch in list lengths: big_clips={len(big_clips)}, small_clips={len(small_clips)}, label_clips={len(label_clips)}"
+        num_clips = len(label_clips)
+        assert num_clips == len(big_clips) == len(small_clips), \
+            f"Mismatch in list lengths: big={len(big_clips)}, small={len(small_clips)}, label={num_clips}"
 
-        input_path_name_list = []
-        label_path_name_list = []
+        input_paths = [None] * num_clips
+        label_paths = [None] * num_clips
 
-        # Iterate over each label clip
-        for i in range(len(label_clips)):
-            # Construct file paths
-            input_path_name = os.path.join(self.cached_path, f"{filename}_input{i}.pickle")
-            label_path_name = os.path.join(self.cached_path, f"{filename}_label{i}.npy")
-
-            frames_dict = {0: big_clips[i], 1: small_clips[i]}
+        for i, (big_clip, small_clip, label_clip) in enumerate(zip(big_clips, small_clips, label_clips)):
+            input_path = os.path.join(cached_path, f"{filename}_input{i}.pickle")
+            label_path = os.path.join(cached_path, f"{filename}_label{i}.npy")
 
             # Save label as .npy
-            np.save(label_path_name, label_clips[i])
+            np.save(label_path, label_clip)
 
             # Save frames as .pickle
-            with open(input_path_name, 'wb') as handle:
-                pickle.dump(frames_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(input_path, 'wb') as f:
+                pickle.dump({0: big_clip, 1: small_clip}, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            # Store file paths
-            input_path_name_list.append(input_path_name)
-            label_path_name_list.append(label_path_name)
+            input_paths[i] = input_path
+            label_paths[i] = label_path
 
-        return input_path_name_list, label_path_name_list
+        return input_paths, label_paths
 
     def load_preprocessed_data(self):
         """Loads preprocessed data file paths and their corresponding labels from a CSV file.

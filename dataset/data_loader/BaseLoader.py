@@ -168,7 +168,7 @@ class BaseLoader(Dataset):
         """
         raise Exception("'split_raw_data' Not Implemented")
 
-    def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=8):
+    def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=10):
         """
         Allocate dataset preprocessing across multiple processes.
 
@@ -327,86 +327,50 @@ class BaseLoader(Dataset):
         # Return processed video frames and BVP signals
         return frames_clips, bvps_clips
 
-    def crop_face_resize(self, frames, use_face_detection, backend, use_larger_box, larger_box_coef, use_dynamic_detection, 
-                         detection_freq, use_median_box, width, height):
+    def crop_face_resize(self, frames, use_face_detection, backend, use_larger_box, larger_box_coef,
+                     use_dynamic_detection, detection_freq, use_median_box, width, height):
         """
         Crop and resize face regions in video frames.
-
-        Args:
-            frames (np.array): Array of video frames.
-            use_face_detection (bool): Whether to perform face detection.
-            backend (str): Backend to use for face detection (e.g., 'HC' for Haar Cascade, 'RF' for RetinaFace).
-            use_larger_box (bool): Whether to use a larger bounding box for face detection.
-            larger_box_coef (float): Coefficient to enlarge the bounding box.
-            use_dynamic_detection (bool): Whether to perform face detection dynamically at intervals.
-            detection_freq (int): Frequency of frames to perform face detection.
-            use_median_box (bool): Whether to use the median face box across detected frames.
-            width (int): Target width for resized frames.
-            height (int): Target height for resized frames.
-
-        Returns:
-            np.array: Array of resized frames with face regions.
         """
-        # Determine the number of times to perform face detection based on dynamic detection settings
-        if use_dynamic_detection:
-            num_dynamic_det = ceil(frames.shape[0] / detection_freq)
-        else:
-            num_dynamic_det = 1
+        num_frames = frames.shape[0]
+        frame_h, frame_w = frames.shape[1:3]
+        resized_frames = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
 
+        # Determine how many times to detect faces
+        num_detections = ceil(num_frames / detection_freq) if use_dynamic_detection else 1
+
+        # Detect faces on sampled frames
         face_region_all = []
-        # Perform face detection at specified intervals
-        for idx in range(num_dynamic_det):
-            # Detect face in the current frame
+        for idx in range(num_detections):
+            frame_idx = idx * detection_freq
             if use_face_detection:
-                face_region_all.append(self.face_detection(frames[detection_freq * idx], backend, use_larger_box, larger_box_coef))
+                face_region = self.face_detection(frames[frame_idx], backend, use_larger_box, larger_box_coef)
             else:
-                # Use the entire frame if face detection is not used
-                face_region_all.append([0, 0, frames.shape[1], frames.shape[2]])
+                face_region = [0, 0, frame_w, frame_h]
+            face_region_all.append(face_region)
 
-        # Convert face regions to a numpy array
-        face_region_all = np.asarray(face_region_all, dtype='int')
+        face_region_all = np.asarray(face_region_all, dtype=int)
 
-        # Calculate the median face box if required
-        if use_median_box:
-            face_region_median = np.median(face_region_all, axis=0).astype('int')
+        # Compute median box if needed
+        face_region_median = np.median(face_region_all, axis=0).astype(int) if use_median_box else None
 
-        # Initialize an array to store resized frames
-        resized_frames = np.zeros((frames.shape[0], height, width, 3))
-        for i in range(0, frames.shape[0]):
-            frame = frames[i]
+        # Precompute for loop
+        get_face_region = (
+            lambda i: face_region_median if use_median_box else face_region_all[i // detection_freq]
+            if use_dynamic_detection else face_region_all[0]
+        )
 
-            # Determine the reference index for face region based on dynamic detection
-            if use_dynamic_detection:  # use the (i // detection_freq)-th facial region.
-                reference_index = i // detection_freq
-            else:  # use the first region obtrained from the first frame.
-                reference_index = 0
-
+        for i, frame in enumerate(frames):
             if use_face_detection:
-                # Use the median face box or the detected face region
-                if use_median_box:
-                    face_region = face_region_median
-                else:
-                    face_region = face_region_all[reference_index]
-                
-                # Calculate the top boundary of the face region
-                top_boundary = max(face_region[1], 0)
+                x, y, w, h = get_face_region(i)
+                top = max(y, 0)
+                bottom = min(y + h, frame_h)
+                left = max(x, 0)
+                right = min(x + w, frame_w)
+                frame = frame[top:bottom, left:right]
 
-                # Calculate the bottom boundary of the face region
-                bottom_boundary = min(face_region[1] + face_region[3], frame.shape[0])
-
-                # Calculate the left boundary of the face region
-                left_boundary = max(face_region[0], 0)
-                
-                # Calculate the right boundary of the face region
-                right_boundary = min(face_region[0] + face_region[2], frame.shape[1])
-
-                # Crop the frame to the detected face region using the calculated boundaries
-                frame = frame[top_boundary:bottom_boundary, left_boundary:right_boundary]
-                
-            # Resize the cropped frame to the target dimensions
             resized_frames[i] = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
-        # Return the array of resized frames
         return resized_frames
 
     def face_detection(self, frame, backend, use_larger_box=False, larger_box_coef=1.0):
@@ -509,99 +473,94 @@ class BaseLoader(Dataset):
 
     @staticmethod
     def diff_normalize_data(data):
-        """Calculate discrete difference in video data along the time-axis and normalize by its standard deviation."""
+        """
+        Compute difference-normalized video data along time axis, then normalize.
         
-        # Extract the shape of the input data
-        n, h, w, c = data.shape
+        Args:
+            data (np.ndarray): Input video array of shape (n, h, w, c).
+        
+        Returns:
+            np.ndarray: Difference-normalized and standardized video data (float32).
+        """
+        # Ensure input is float32
+        data = data.astype(np.float32)
 
-        # Calculate the length of the difference-normalized data (one less than the number of frames)
-        diffnormalized_len = n - 1
+        # Compute difference and summation between consecutive frames
+        diff = data[1:] - data[:-1]
+        summation = data[1:] + data[:-1] + 1e-7  # prevent division by zero
 
-        # Initialize an array to store the difference-normalized frames
-        diffnormalized_data = np.zeros((diffnormalized_len, h, w, c), dtype=np.float32)
+        # Normalize the differences
+        diff_normalized = np.divide(diff, summation, where=summation != 0)
 
-        # Initialize a padding array with a single frame of zeros
-        diffnormalized_data_padding = np.zeros((1, h, w, c), dtype=np.float32)
+        # Normalize by standard deviation
+        std = np.std(diff_normalized, dtype=np.float32)
+        if std != 0:
+            diff_normalized = diff_normalized / std
 
-        # Calculate the difference between consecutive frames and normalize
-        for j in range(diffnormalized_len):
-            diffnormalized_data[j, :, :, :] = (data[j + 1, :, :, :] - data[j, :, :, :]) / (data[j + 1, :, :, :] + data[j, :, :, :] + 1e-7)
+        # Replace any NaNs with zeros
+        np.nan_to_num(diff_normalized, copy=False)
 
-        # Normalize the entire array by its standard deviation. Trial and error if this 2nd normalization benefits our model
-        diffnormalized_data = diffnormalized_data / np.std(diffnormalized_data) 
+        # Pad to match original number of frames, using the same dtype
+        padding = np.zeros((1, *data.shape[1:]), dtype=diff_normalized.dtype)
+        result = np.concatenate((diff_normalized, padding), axis=0)
 
-        # Append the padding to maintain the original number of frames
-        diffnormalized_data = np.append(diffnormalized_data, diffnormalized_data_padding, axis=0)
-
-        # Replace any NaN values with zeros
-        diffnormalized_data[np.isnan(diffnormalized_data)] = 0
-
-        # Return the processed difference-normalized data
-        return diffnormalized_data
+        return result.astype(np.float32)  # Final dtype guaranteed
 
     @staticmethod
     def standardized_data(data):
         """
         Z-score standardization for video data.
 
-        This method standardizes the input data by centering it to have a mean of 0
-        and scaling it to have a standard deviation of 1. It also handles any NaN
-        values that may result from the standardization process.
-
         Args:
-            data (np.array): The input video data to be standardized.
+            data (np.ndarray): The input video data to be standardized.
 
         Returns:
-            np.array: The standardized video data with a mean of 0 and a standard deviation of 1.
+            np.ndarray: The standardized video data.
         """
+        mean = np.mean(data)
+        std = np.std(data)
 
-        # Subtract the mean from each element to center the data around zero
-        data = data - np.mean(data)
+        # Avoid division by zero by checking if std is non-zero
+        if std == 0:
+            return np.zeros_like(data, dtype=np.float32)
 
-        # Divide each element by the standard deviation to scale the data
-        data = data / np.std(data)
+        # Perform standardization and handle NaNs (if any)
+        standardized = (data - mean) / std
+        np.nan_to_num(standardized, copy=False)  # replaces NaNs with 0 in-place
 
-        # Replace any NaN values with 0 to handle division by zero or initial NaNs
-        data[np.isnan(data)] = 0
-
-        return data
+        return standardized.astype(np.float32)
 
     @staticmethod
     def diff_normalize_label(label):
-        """Calculate discrete difference in labels along the time-axis and normalize by its standard deviation."""
-    
-        # Calculate the discrete difference along the time-axis (axis=0), finding the change between consecutive elements in the array.
+        """
+        Calculate the discrete difference in labels along the time-axis and normalize by its standard deviation.
+        Returns an array of the same length as the input.
+        """
+        # Compute discrete difference
         diff_label = np.diff(label, axis=0)
 
-        # Normalize the differences by dividing by their standard deviation
-        diffnormalized_label = diff_label / np.std(diff_label)
+        # Compute standard deviation once
+        std = np.std(diff_label)
+        if std == 0 or np.isnan(std):
+            normalized = np.zeros_like(label[:-1])
+        else:
+            normalized = diff_label / std
 
-        # Append a zero to the end to maintain the original length of the label array
-        diffnormalized_label = np.append(diffnormalized_label, np.zeros(1), axis=0)
+        # Pad with zero to match original length
+        result = np.concatenate([normalized, [0]])
 
-        # Replace any NaN values with zero (NaNs can occur if std deviation is zero)
-        diffnormalized_label[np.isnan(diffnormalized_label)] = 0
-
-        # Return the normalized differences with the same length as the original label
-        return diffnormalized_label
+        return result
 
     @staticmethod
     def standardized_label(label):
-        """Z-score standardization for label signal"""
+        """Z-score standardization for label signal."""
+        mean = np.mean(label)
+        std = np.std(label)
 
-        # Subtract the mean from each element to center the data around zero
-        label = label - np.mean(label)
+        if std == 0 or np.isnan(std):
+            return np.zeros_like(label)
 
-        # Divide each element by the standard deviation to scale the data
-        # so that it has a standard deviation of 1
-        label = label / np.std(label)
-
-        # Replace any NaN values with 0 to handle cases where the standard
-        # deviation is zero or the input data contains NaN values
-        label[np.isnan(label)] = 0
-
-        # Return the standardized label array
-        return label
+        return (label - mean) / std
 
     def chunk(self, frames, bvps, chunk_length):
         """
@@ -947,41 +906,50 @@ class BaseLoader(Dataset):
     @staticmethod
     def resample_signal(input_signal, target_length):
         """
-        Resamples the input signal to a specified target length using linear interpolation.
-
+        Efficiently resamples a 1D input signal to the specified target length using linear interpolation.
+        
         Args:
-            input_signal (np.array): The original 1D signal to be resampled.
-            target_length (int): The desired length of the output signal after resampling.
+            input_signal (np.ndarray): The original 1D signal to be resampled.
+            target_length (int): The desired length of the resampled signal.
 
         Returns:
-            np.array: A new signal that is a resampled version of the input signal, with a length of target_length.
+            np.ndarray: Resampled 1D signal.
         """
-        # Generate target_length number of evenly spaced indices between 1 and the length of input_signal
-        new_indices = np.linspace(1, input_signal.shape[0], target_length)
+        original_length = input_signal.shape[0]
         
-        # Generate original indices for the input_signal
-        original_indices = np.linspace(1, input_signal.shape[0], input_signal.shape[0])
-        
-        # Perform linear interpolation to resample the input_signal at the new indices
-        return np.interp(new_indices, original_indices, input_signal)
+        if original_length == target_length:
+            return input_signal
+
+        # Generate new resampled indices in the range [0, original_length - 1]
+        new_indices = np.linspace(0, original_length - 1, target_length)
+
+        # Original indices are simply [0, 1, ..., original_length - 1]
+        return np.interp(new_indices, np.arange(original_length), input_signal)
 
     @staticmethod
     def center_crop_square(image, height, width, square_size):
         """Crops the center square from an image (supports both grayscale & color)"""
-
-        # Compute crop start & end points
-        y_start = (height - square_size) // 2
-        x_start = (width - square_size) // 2
         
-        # Perform cropping
-        return image[y_start:y_start + square_size, x_start:x_start + square_size]
+        y = (height - square_size) >> 1  # Bitwise shift is marginally faster than //
+        x = (width - square_size) >> 1
+        return image[y:y + square_size, x:x + square_size]
 
     @staticmethod
-    def resize(image, downsample=False, target_size=(144, 144)):
-        """Resizes an image to a specified target size"""
-        if downsample:
-            image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
-
+    def resize(image, target_size=(144, 144), downsample=False):
+        """
+        Resizes an image to a specified target size.
+        
+        Args:
+            image (np.ndarray): Input image.
+            target_size (tuple): Desired (width, height).
+            downsample (bool): Use INTER_AREA for downsampling, INTER_LINEAR otherwise.
+        
+        Returns:
+            np.ndarray: Resized image.
+        """
+        if image.shape[1::-1] != target_size:
+            interpolation = cv2.INTER_AREA if downsample else cv2.INTER_LINEAR
+            image = cv2.resize(image, target_size, interpolation=interpolation)
         return image
 
     def generate_pos_ppg(self, frames, fps=30):
