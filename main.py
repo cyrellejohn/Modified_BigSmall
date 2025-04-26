@@ -89,6 +89,8 @@ def run_model(config, data_loader_dict, train=True, test=True):
     """
     if config.MODEL.NAME == 'BigSmall':
         model_trainer = trainer.BigSmallTrainer.BigSmallTrainer(config, data_loader_dict)
+    elif config.MODEL.NAME == 'MDMER_BigSmall':
+        model_trainer = trainer.MDMERTrainer.BigSmallTrainer(config, data_loader_dict)
     elif config.MODEL.NAME == 'DeepPhys':
         model_trainer = trainer.DeepPhysTrainer.DeepPhysTrainer(config, data_loader_dict)
     else:
@@ -141,7 +143,7 @@ if __name__ == "__main__":
             
             # Create a PyTorch DataLoader for the training data.
             data_loader_dict['train'] = DataLoader(dataset=train_data_loader, # The dataset to load.
-                                                   num_workers=16, # Default 16, 4 for now | Number of subprocesses to use for data loading.
+                                                   num_workers=12, # Default 16, 4 for now | Number of subprocesses to use for data loading.
                                                    batch_size=config.TRAIN.BATCH_SIZE, # Number of samples per batch to load.
                                                    shuffle=True, # Shuffle the data at every epoch.
                                                    worker_init_fn=seed_worker, # Function to initialize the random seed for each worker.
@@ -173,7 +175,7 @@ if __name__ == "__main__":
             
             # Create a DataLoader for the validation dataset
             data_loader_dict["valid"] = DataLoader(dataset=valid_data_loader, # The dataset to load
-                                                   num_workers=8, # Number of subprocesses for data loading
+                                                   num_workers=12, # Number of subprocesses for data loading
                                                    batch_size=config.TRAIN.BATCH_SIZE, # Batch size, same as training
                                                    shuffle=False, # Do not shuffle validation data
                                                    worker_init_fn=seed_worker, # Initialize each worker with a seed
@@ -207,7 +209,7 @@ if __name__ == "__main__":
 
             # Create a DataLoader for the test dataset. This DataLoader will handle batching, shuffling, and parallel data loading.
             data_loader_dict["test"] = DataLoader(dataset=test_data_loader, # The dataset to load
-                                                  num_workers=8, # Number of subprocesses for data loading.
+                                                  num_workers=12, # Number of subprocesses for data loading.
                                                   batch_size=config.INFERENCE.BATCH_SIZE, # Number of samples per batch.
                                                   shuffle=False, # Do not shuffle data (order matters for testing).
                                                   worker_init_fn=seed_worker, # Function to initialize each worker process.
@@ -222,7 +224,7 @@ if __name__ == "__main__":
         raise ValueError("Unsupported toolbox_mode! Currently support train_and_test, only_test or unsupervised_method")
     
     if config.TOOLBOX_MODE == "train_and_test":
-        pass # run_model(config, data_loader_dict, train=True, test=True)
+        run_model(config, data_loader_dict, train=True, test=True)
 
     elif config.TOOLBOX_MODE == "only_test":
         run_model(config, data_loader_dict, train=False, test=True)

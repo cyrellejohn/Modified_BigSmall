@@ -17,9 +17,9 @@ import torch.nn as nn
 ##################################### BigSmall Model ##################################
 #######################################################################################
 class BigSmall(nn.Module):
-    def __init__(self, in_channels=3, nb_filters1=32, nb_filters2=64, kernel_size=3, 
-                 dropout_rate1=0.25, dropout_rate2=0.5, dropout_rate3=0.5, pool_size1=(2, 2), pool_size2=(4,4),
-                 nb_dense=128, out_size_ppg=1, out_size_au=18, n_segment=3):
+    def __init__(self, in_channels=3, nb_filters1=32, nb_filters2=64, kernel_size=3, dropout_rate1=0.25, 
+                 dropout_rate2=0.5, dropout_rate3=0.5, pool_size1=(2, 2), pool_size2=(4,4), nb_dense=128, 
+                 out_size_au=12, out_size_ppg=1, out_size_emotion=8, n_segment=3):
         """
         Initialize the BigSmall model for multi-task learning.
 
@@ -32,6 +32,7 @@ class BigSmall(nn.Module):
         - pool_size1, pool_size2: Pooling sizes for average pooling layers.
         - nb_dense: Number of units in the dense (fully connected) layers.
         - out_size_ppg, out_size_au: Output sizes for BVP, respiration, and AU tasks.
+        - out_size_emotion: Output size for emotion task.
         - n_segment: Number of segments for temporal processing.
         """
 
@@ -49,9 +50,9 @@ class BigSmall(nn.Module):
         self.pool_size2 = pool_size2
         self.nb_dense = nb_dense
 
-        self.out_size_ppg = out_size_ppg
         self.out_size_au = out_size_au
-
+        self.out_size_ppg = out_size_ppg
+        self.out_size_emotion = out_size_emotion
         self.n_segment = n_segment
 
         # Big Convolutional Layers

@@ -593,6 +593,45 @@ class MDMERLoader(BaseLoader):
 
         # Calculate and store the length of the preprocessed dataset
         self.preprocessed_data_len = len(inputs)
+    
+    def load_preprocessed_data_lightning(self):
+        """Loads preprocessed data file paths and their corresponding labels from a CSV file.
+
+        This method reads a CSV file containing a list of preprocessed data files, extracts the file paths,
+        generates corresponding label file paths, and stores them in the class attributes for later use.
+        It also checks for errors in loading the data and calculates the length of the preprocessed dataset.
+        """
+
+        # Retrieve the path to the file list CSV
+        file_list_path = self.file_list_path
+        cached_path = self.cached_path
+
+        # Read the CSV file into a Pandas DataFrame
+        file_list_df = pd.read_csv(file_list_path)
+
+        # Extract the 'input_files' column as a list of input file paths
+        inputs = file_list_df['input_files'].tolist()
+        inputs = [os.path.join(cached_path, os.path.basename(path))
+                  for path in file_list_df['input_files']]
+
+        # Check if the list of inputs is empty and raise an error if so
+        if not inputs:
+            raise ValueError(self.dataset_name + ' dataset loading data error!')
+
+        # Sort the list of input file paths
+        inputs = sorted(inputs)
+
+        # Generate a list of label file paths by replacing "input" with "label" in each input file path
+        labels = [input_file.replace("input", "label").replace('.pickle', '.npy') for input_file in inputs]
+
+        # Store the sorted input file paths in the class attribute
+        self.inputs = inputs
+
+        # Store the label file paths in the class attribute
+        self.labels = labels
+
+        # Calculate and store the length of the preprocessed dataset
+        self.preprocessed_data_len = len(inputs)
 
     def __getitem__(self, index):
         """

@@ -116,7 +116,7 @@ class BaseLoader(Dataset):
                 print('File list generated.', end='\n\n')
 
             # Load preprocessed data
-            self.load_preprocessed_data()
+            self.load_preprocessed_data_lightning()
 
         # Print paths and dataset length for logging
         print('Cached Data Path', self.cached_path, end='\n\n')
