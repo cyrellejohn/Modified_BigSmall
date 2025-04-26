@@ -14,6 +14,7 @@ from scipy import sparse
 import math
 from multiprocessing import Pool, Process, Value, Array, Manager
 from unsupervised_methods.algorithm import POS
+import time
 
 '''
 Unsupervised methods will not work on this project.
@@ -170,7 +171,7 @@ class BaseLoader(Dataset):
 
     def multi_process_manager(self, data_dirs, config_preprocess, multi_process_quota=10):
         """
-        Allocate dataset preprocessing across multiple processes.
+        Allocate dataset preprocessing across multiple processes efficiently.
 
         Args:
             data_dirs (List[str]): A list of video file paths to be processed.
@@ -179,90 +180,37 @@ class BaseLoader(Dataset):
 
         Returns:
             file_list_dict (Dict): A dictionary containing information regarding processed data (path names).
-
-        Steps:
-        1. Initialize the number of files to process and create a progress bar using `tqdm`.
-        2. Set up a shared dictionary using `Manager` to store processed file information.
-        3. Iterate over each file index and manage the creation of subprocesses:
-        - Check if the number of running processes is below the specified quota.
-        - If so, create and start a new process for the current file, and add it to the process list.
-        4. Continuously monitor active processes:
-        - Remove and join completed processes to free up resources.
-        - Update the progress bar as processes complete.
-        5. Ensure all processes are joined and the progress bar is closed after processing.
-        6. Return the dictionary containing processed file information.
         """
-        # Print a message indicating the start of the preprocessing
         print('Preprocessing dataset...')
 
-        # Determine the number of files to process
         file_num = len(data_dirs)
-
-        # Create a range object for iterating over the files
-        choose_range = range(0, file_num)
-
-        # Initialize a progress bar to track the progress of preprocessing
-        pbar = tqdm(list(choose_range))
-
-        # Create a manager for shared resources across processes
         manager = Manager()
-        # Create a shared dictionary for storing processed file paths
         file_list_dict = manager.dict()
-
-        # Initialize a list to keep track of active processes
-        p_list = []
-
-        # Initialize a counter for the number of running processes
-        running_num = 0
-
-        # Iterate over each file index in the range
-        for i in choose_range:
-            process_flag = True
-
-            # Ensure that a new process is created for each file
-            while process_flag:
-                # Check if the number of running processes is below the quota
-                if running_num < multi_process_quota:
-                    # Create a new process for preprocessing the current file
-                    p = Process(target=self.preprocess_dataset_subprocess, 
-                                args=(data_dirs, config_preprocess, i, file_list_dict))
-
-                    # Start the process
-                    p.start()
-
-                    # Add the process to the list of active processes
-                    p_list.append(p)
-
-                    # Increment the running process counter
-                    running_num += 1
-
-                    # Exit the loop to move to the next file
-                    process_flag = False
-
-                # Check if any processes have finished
-                for p_ in p_list:
-                    if not p_.is_alive():
-                        # Remove the finished process from the list
-                        p_list.remove(p_)
-
-                        # Ensure the process has completed
-                        p_.join()
-
-                        # Decrement the running process counter
-                        running_num -= 1
-                        
-                        # Update the progress bar
-                        pbar.update(1)
         
-        # Wait for all remaining processes to complete
-        for p_ in p_list:
-            p_.join()
-            pbar.update(1)
+        processes = []
+        pbar = tqdm(total=file_num, desc="Preprocessing files")
 
-        # Close the progress bar
+        i = 0
+        while i < file_num or processes:
+            # Clean up finished processes
+            for p in processes[:]:  # Iterate over a copy
+                if not p.is_alive():
+                    p.join()
+                    processes.remove(p)
+                    pbar.update(1)
+
+            # Start new processes if below the quota
+            while len(processes) < multi_process_quota and i < file_num:
+                p = Process(target=self.preprocess_dataset_subprocess, 
+                            args=(data_dirs, config_preprocess, i, file_list_dict))
+                p.start()
+                processes.append(p)
+                i += 1
+
+            # Sleep briefly to prevent busy waiting
+            time.sleep(30.0)
+
         pbar.close()
-        
-        # Return the dictionary containing processed file paths
         return file_list_dict
 
     def preprocess(self, frames, bvps, config_preprocess):

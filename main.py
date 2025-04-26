@@ -157,6 +157,8 @@ if __name__ == "__main__":
             valid_loader = data_loader.UBFCrPPGLoader.UBFCrPPGLoader
         elif config.VALID.DATA.DATASET == "UBFCrPPG_BigSmall":
             valid_loader = data_loader.BigSmallLoader.UBFCrPPGLoader
+        elif config.VALID.DATA.DATASET == "MDMER":
+            valid_loader = data_loader.BigSmallLoader.MDMERLoader
         elif config.VALID.DATA.DATASET is None and config.VALID.RUN_VALIDATION:
             raise ValueError("Validation dataset not specified despite RUN_VALIDATION is set to True!")
         else:
@@ -188,6 +190,8 @@ if __name__ == "__main__":
             test_loader = data_loader.UBFCrPPGLoader.UBFCrPPGLoader
         elif config.TEST.DATA.DATASET == "UBFCrPPG_BigSmall":
             test_loader = data_loader.BigSmallLoader.UBFCrPPGLoader
+        elif config.TEST.DATA.DATASET == "MDMER":
+            test_loader = data_loader.BigSmallLoader.MDMERLoader
         else:
             raise ValueError("Unsupported dataset! Currently supporting UBFC-rPPG dataset.")
 

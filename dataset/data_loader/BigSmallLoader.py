@@ -106,99 +106,106 @@ class MDMERLoader(BaseLoader):
     
     def preprocess_dataset_subprocess(self, data_dirs, config_preprocess, i, file_list_dict):
         """Invoked by preprocess_dataset for multi-process data preprocessing."""
-        
-        # Extract the subject path and saved filename
-        subject_path = data_dirs[i]['path']
-        saved_filename = data_dirs[i]['index']
 
-        # Paths to the raw video, camera trigger, and raw PPG files
+        subject_info = data_dirs[i]
+        subject_path = subject_info['path']
+        saved_filename = subject_info['index']
+
+        # Path setup
         subject_video = os.path.join(subject_path, "vid.mp4")
-        subject_emotion = pd.read_csv(os.path.join(subject_path, "emotion.csv"), skiprows=1, header=None).values[:, 1:]
-        subject_vad = pd.read_csv(os.path.join(subject_path, "vad.csv"), skiprows=1, header=None).values[:, 1:]
-        subject_ppg = pd.read_csv(os.path.join(subject_path, "ppg.csv"), skiprows=1, header=None)
-
-        # Working directory of the AUCoding from OpenFace
         libreface_dir = os.path.join(subject_path, "facs", "libreface")
         openface_dir = os.path.join(subject_path, "facs", "openface")
 
-        # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
-        if 'None' in config_preprocess.DATA_AUG:
-            # Use dataset-specific function to read video frames from .mp4 file
-            frames = self.read_video(subject_video, config_preprocess)
-        elif 'Motion' in config_preprocess.DATA_AUG:
-            # Use general function to read video frames from .npy files
-            frames = self.read_npy_video(glob.glob(os.path.join(data_dirs[i]['path'],'*.npy')))
-        else:
-            # Raise an error if DATA_AUG configuration is unsupported
-            raise ValueError(f'Unsupported DATA_AUG specified for {self.dataset_name} dataset! Received {config_preprocess.DATA_AUG}.')
-        
-        combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
-        phys_labels = self.preprocess_ppg(subject_ppg.values[:, 3], frames.shape[0])
+        # Helper to load CSV quickly
+        def load_csv_values(path, col_slice=slice(1, None)):
+            return pd.read_csv(path, skiprows=1, header=None).values[:, col_slice]
 
-        # GENERATE PSUEDO PHYSIOLOGICAL SIGNAL LABELS 
+        # Batch load labels
+        subject_emotion = load_csv_values(os.path.join(subject_path, "emotion.csv"))
+        subject_vad = load_csv_values(os.path.join(subject_path, "vad.csv"))
+        subject_ppg = load_csv_values(os.path.join(subject_path, "ppg.csv"), col_slice=3)
+
+        # Load frames based on DATA_AUG
+        data_aug = config_preprocess.DATA_AUG
+        if 'None' in data_aug:
+            frames = self.read_video(subject_video, config_preprocess)
+        elif 'Motion' in data_aug:
+            npy_files = glob.glob(os.path.join(subject_path, '*.npy'))
+            frames = self.read_npy_video(npy_files)
+        else:
+            raise ValueError(f'Unsupported DATA_AUG: {data_aug}')
+
+        frame_count = frames.shape[0]
+
+        # Label preprocessing
+        combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
+        phys_labels = self.preprocess_ppg(subject_ppg.flatten(), frame_count)
+
         psuedo_phys_labels = None
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
             psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
 
-        # Extract labels from libreface
+        # Extract LibreFace labels
         au_occ_lf, au_int_lf, emotion_lf, *lf_colnames = self.extract_labels_libreface(libreface_dir)
+
+        # Initialize AU column name lists
         au_occ_colnames = list(lf_colnames[0])
         au_int_colnames = list(lf_colnames[1])
-        emotion_colnames = ['amusement', 'disgust', 'arousal', 'valence', 'dominance'] + list(lf_colnames[2])
 
-        # Extract OpenFace labels with configs
-        openface_configs = [('au_dynamic', ''),
-                            ('au_dynamic_wild', '_wild'),
-                            ('au_static', '_static'),
-                            ('au_static_wild', '_static_wild')]
+        # Extract OpenFace labels
         openface_labels = {}
+        openface_configs = [
+            ('au_dynamic', ''), 
+            ('au_dynamic_wild', '_wild'), 
+            ('au_static', '_static'), 
+            ('au_static_wild', '_static_wild')
+        ]
 
-        for dir, colname in openface_configs:
-            occ, intensity, *cols = self.extract_labels_openface(openface_dir, dir, colname)
-            openface_labels[f'au_occ_of_{dir}'] = occ
-            openface_labels[f'au_int_of_{dir}'] = intensity
-            au_occ_colnames += list(cols[0]) 
-            au_int_colnames += list(cols[1])
+        for dir_name, suffix in openface_configs:
+            occ, intensity, *cols = self.extract_labels_openface(openface_dir, dir_name, suffix)
+            openface_labels[f'au_occ_of_{dir_name}'] = occ
+            openface_labels[f'au_int_of_{dir_name}'] = intensity
+            au_occ_colnames.extend(cols[0])
+            au_int_colnames.extend(cols[1])
 
-        # Combine all labels
-        labels = {
-            'combined_emotion': combined_emotion,
-            'phys_labels': phys_labels,
-            'psuedo_phys_labels': psuedo_phys_labels,
-            'au_occ_lf': au_occ_lf,
-            'au_int_lf': au_int_lf,
-            'emotion_lf': emotion_lf,
-            **openface_labels
-        }
+        # Merge all labels for shape validation
+        labels = {'combined_emotion': combined_emotion,
+                  'phys_labels': phys_labels,
+                  'psuedo_phys_labels': psuedo_phys_labels,
+                  'au_occ_lf': au_occ_lf,
+                  'au_int_lf': au_int_lf,
+                  'emotion_lf': emotion_lf,
+                  **openface_labels}
 
-        mismatched = [name for name, label in labels.items() if label.shape[0] != frames.shape[0]]
-        assert not mismatched, f"{saved_filename} Shape mismatch in: {', '.join(mismatched)}. Expected shape: {frames.shape[0]}"
+        mismatched = [name for name, arr in labels.items() if arr is not None and arr.shape[0] != frame_count]
+        if mismatched:
+            raise ValueError(f"{saved_filename} shape mismatch: {', '.join(mismatched)} (expected {frame_count})")
 
-        # Save label names if required
+        # Save label names once
         if self.dataset_name == "train" and i == 0:
-            combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + au_occ_colnames + au_int_colnames + emotion_colnames)
+            emotion_label_names = ['amusement', 'disgust', 'arousal', 'valence', 'dominance']
+
+            combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + 
+                                         au_occ_colnames + 
+                                         au_int_colnames + 
+                                         emotion_label_names + 
+                                         list(lf_colnames[2]))
+            
             self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
 
         # Merge AU features
-        au_occ_all = np.concatenate([au_occ_lf] + \
-                                    [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')], axis=1)
-        au_int_all = np.concatenate([au_int_lf] + \
-                                    [v for k, v in openface_labels.items() if k.startswith('au_int_of_')], axis=1)
+        au_occ_all = np.concatenate([au_occ_lf] + [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')], axis=1)
+        au_int_all = np.concatenate([au_int_lf] + [v for k, v in openface_labels.items() if k.startswith('au_int_of_')], axis=1)
 
-        # Merge all emotion-related labels
+        # Merge all emotion labels
         all_emotion = np.concatenate([combined_emotion, emotion_lf], axis=1)
 
-        # Run full preprocessing
-        big_clips, small_clips, label_clips = self.preprocess(frames, 
-                                                              phys_labels, 
-                                                              psuedo_phys_labels, 
-                                                              au_occ_all, 
-                                                              au_int_all, 
-                                                              all_emotion, 
-                                                              config_preprocess)                             
-        
-        # Save the processed data with its file chunks and update the file list dictionary
-        input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
+        # Main preprocessing
+        big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, 
+                                                              au_occ_all, au_int_all, all_emotion, config_preprocess)
+
+        # Save processed clips
+        input_name_list, _ = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
         file_list_dict[i] = input_name_list
     
     def read_video(self, video_file, config_preprocess):

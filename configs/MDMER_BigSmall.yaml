@@ -49,7 +49,7 @@ VALID:
     DATASET: MDMER
     DO_PREPROCESS: True # If first time, should be True 
     DATA_FORMAT: NDCHW # NCDHW
-    DATA_PATH: "data/MDMER/Raw_data" # Raw dataset path, need to be updated
+    DATA_PATH: "data/MDMER/Aligned_data" # Raw dataset path, need to be updated
     CACHED_PATH: "data/MDMER/PreprocessedData" # Processed dataset save path, need to be updated
     EXP_DATA_NAME: "" 
     BEGIN: 0.7
@@ -87,7 +87,7 @@ TEST:
     DATASET: MDMER
     DO_PREPROCESS: True # If first time, should be True 
     DATA_FORMAT: NDCHW # NCDHW
-    DATA_PATH: "data/MDMER/Raw_data" # Raw dataset path, need to be updated
+    DATA_PATH: "data/MDMER/Aligned_data" # Raw dataset path, need to be updated
     CACHED_PATH: "data/MDMER/PreprocessedData" # Processed dataset save path, need to be updated
     EXP_DATA_NAME: "" 
     BEGIN: 0.85
