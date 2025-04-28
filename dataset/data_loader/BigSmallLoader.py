@@ -323,24 +323,34 @@ class MDMERLoader(BaseLoader):
         usecols = au_occ_cols + au_int_cols + emotion_col
         df = pd.read_csv(full_path, usecols=usecols)
 
+        # Map emotion directly onto the DataFrame
+        emotion_mapping = {"Neutral": 0,
+                           "Happiness": 1,
+                           "Sadness": 2,
+                           "Surprise": 3,
+                           "Fear": 4,
+                           "Disgust": 5,
+                           "Anger": 6,
+                           "Contempt": 7}
+        
+        df['facial_expression'] = df['facial_expression'].map(emotion_mapping).fillna(-1).astype(int)
+
         # Extract column groups
         au_occ = df[au_occ_cols]
         au_int = df[au_int_cols]
-        emotion = df[emotion_col]
+        emotion = df[['facial_expression']]
 
-        # Create renamed versions of columns (stored separately, not assigned)
+        # Create renamed versions of columns
         au_occ_column_names = [f'AU{col[3:]}_lf' for col in au_occ_cols]
         au_int_column_names = [f'AU{col[3:-10]}_int_lf' for col in au_int_cols]
         emotion_column_name = ['emotion_lf']
 
-        return (
-            au_occ,
-            au_int,
-            emotion,
-            au_occ_column_names,
-            au_int_column_names,
-            emotion_column_name
-        )
+        return (au_occ,
+                au_int,
+                emotion,
+                au_occ_column_names,
+                au_int_column_names,
+                emotion_column_name)
 
     @staticmethod
     def extract_labels_openface(aucoding_dir, dir_name, colname):
