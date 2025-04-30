@@ -201,7 +201,7 @@ class BaseLoader(Dataset):
 
             # Start new processes if below the quota
             while len(processes) < multi_process_quota and i < file_num:
-                p = Process(target=self.preprocess_dataset_subprocess_variant1, 
+                p = Process(target=self.preprocess_dataset_subprocess, 
                             args=(data_dirs, config_preprocess, i, file_list_dict))
                 p.start()
                 processes.append(p)
