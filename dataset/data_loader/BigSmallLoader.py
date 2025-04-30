@@ -103,29 +103,36 @@ class MDMERLoader(BaseLoader):
 
         # Return the subset of directories
         return data_dirs_new
-    
+
     def preprocess_dataset_subprocess(self, data_dirs, config_preprocess, i, file_list_dict):
         """Invoked by preprocess_dataset for multi-process data preprocessing."""
 
+        # Static Configuration
+        phys_label_type = 'raw'                     # Options: 'raw', 'filtered', 'both'
+        support_backend = 'libreface'                # Options: 'libreface', 'openface', 'both'
+        openface_au_setting = 'dynamic'             # Options: 'dynamic', 'dynamic_wild', 'static', 'static_wild'
+        emotion_source = 'libreface'                 # Options: 'original', 'libreface'
+        original_emotion_setting = 'both'           # Options: 'discrete', 'vad', 'both'
+        include_dominance = False
+
+        # Subject info
         subject_info = data_dirs[i]
         subject_path = subject_info['path']
         saved_filename = subject_info['index']
-
-        # Path setup
         subject_video = os.path.join(subject_path, "vid.mp4")
         libreface_dir = os.path.join(subject_path, "facs", "libreface")
         openface_dir = os.path.join(subject_path, "facs", "openface")
 
-        # Helper to load CSV quickly
+        # Load label data
         def load_csv_values(path, col_slice=slice(1, None)):
-            return pd.read_csv(path, skiprows=1, header=None).values[:, col_slice]
+            data = pd.read_csv(path, skiprows=1, header=None).values
+            return data[:, col_slice] if isinstance(col_slice, slice) else data[:, [col_slice]]
 
-        # Batch load labels
         subject_emotion = load_csv_values(os.path.join(subject_path, "emotion.csv"))
         subject_vad = load_csv_values(os.path.join(subject_path, "vad.csv"))
         subject_ppg = load_csv_values(os.path.join(subject_path, "ppg.csv"), col_slice=3)
 
-        # Load frames based on DATA_AUG
+        # Load frames
         data_aug = config_preprocess.DATA_AUG
         if 'None' in data_aug:
             frames = self.read_video(subject_video, config_preprocess)
@@ -137,76 +144,120 @@ class MDMERLoader(BaseLoader):
 
         frame_count = frames.shape[0]
 
-        # Label preprocessing
-        combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
-        phys_labels = self.preprocess_ppg(subject_ppg.flatten(), frame_count)
+        # PPG Preprocessing
+        ppg_features = self.preprocess_ppg(subject_ppg.flatten(), frame_count)
+        ppg_colnames_map = {'raw': ['ppg'], 'filtered': ['filtered_ppg'], 'both': ['ppg', 'filtered_ppg']}
+        phys_label_idx_map = {'raw': 0, 'filtered': 1, 'both': slice(None)}
 
+        if phys_label_type not in ppg_colnames_map:
+            raise ValueError(f"Unsupported PHYS_LABEL_TYPE: {phys_label_type}")
+
+        phys_labels = ppg_features[:, phys_label_idx_map[phys_label_type]]
+        ppg_colnames = ppg_colnames_map[phys_label_type] + ['pos_ppg']
+
+        # Pseudo PPG
         psuedo_phys_labels = None
         if config_preprocess.USE_PSUEDO_PPG_LABEL:
             psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
 
-        # Extract LibreFace labels
-        au_occ_lf, au_int_lf, emotion_lf, *lf_colnames = self.extract_labels_libreface(libreface_dir)
+        # Extract AU and emotion labels
+        result = self.extract_face_labels(support_backend, openface_au_setting, emotion_source, 
+                                          original_emotion_setting, include_dominance, libreface_dir, 
+                                          openface_dir, subject_emotion, subject_vad, frame_count)
 
-        # Initialize AU column name lists
-        au_occ_colnames = list(lf_colnames[0])
-        au_int_colnames = list(lf_colnames[1])
+        au_occ_all, au_int_all, emotion_all, au_occ_colnames, au_int_colnames, emotion_colnames = result
 
-        # Extract OpenFace labels
-        openface_labels = {}
-        openface_configs = [
-            ('au_dynamic', ''), 
-            ('au_dynamic_wild', '_wild'), 
-            ('au_static', '_static'), 
-            ('au_static_wild', '_static_wild')
-        ]
-
-        for dir_name, suffix in openface_configs:
-            occ, intensity, *cols = self.extract_labels_openface(openface_dir, dir_name, suffix)
-            openface_labels[f'au_occ_of_{dir_name}'] = occ
-            openface_labels[f'au_int_of_{dir_name}'] = intensity
-            au_occ_colnames.extend(cols[0])
-            au_int_colnames.extend(cols[1])
-
-        # Merge all labels for shape validation
-        labels = {'combined_emotion': combined_emotion,
-                  'phys_labels': phys_labels,
-                  'psuedo_phys_labels': psuedo_phys_labels,
-                  'au_occ_lf': au_occ_lf,
-                  'au_int_lf': au_int_lf,
-                  'emotion_lf': emotion_lf,
-                  **openface_labels}
-
-        mismatched = [name for name, arr in labels.items() if arr is not None and arr.shape[0] != frame_count]
-        if mismatched:
-            raise ValueError(f"{saved_filename} shape mismatch: {', '.join(mismatched)} (expected {frame_count})")
-
-        # Save label names once
+        # Save column names once
         if self.dataset_name == "train" and i == 0:
-            emotion_label_names = ['amusement', 'disgust', 'arousal', 'valence', 'dominance']
+            self.save_combined_label_names(ppg_colnames, au_occ_colnames, au_int_colnames, emotion_colnames)
 
-            combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + 
-                                         au_occ_colnames + 
-                                         au_int_colnames + 
-                                         emotion_label_names + 
-                                         list(lf_colnames[2]))
-            
-            self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
-
-        # Merge AU features
-        au_occ_all = np.concatenate([au_occ_lf] + [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')], axis=1)
-        au_int_all = np.concatenate([au_int_lf] + [v for k, v in openface_labels.items() if k.startswith('au_int_of_')], axis=1)
-
-        # Merge all emotion labels
-        all_emotion = np.concatenate([combined_emotion, emotion_lf], axis=1)
-
-        # Main preprocessing
+        # Final preprocessing and save
         big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, 
-                                                              au_occ_all, au_int_all, all_emotion, config_preprocess)
+                                                              au_occ_all, au_int_all, emotion_all, config_preprocess)
 
-        # Save processed clips
         input_name_list, _ = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
         file_list_dict[i] = input_name_list
+
+    def extract_face_labels(self, backend, au_setting, emotion_source, emotion_setting, include_dominance, 
+                            libreface_dir, openface_dir, subject_emotion, subject_vad, frame_count):
+        """Extract AU and emotion labels based on backend and configuration."""
+
+        au_occ_list, au_int_list = [], []
+        au_occ_colnames, au_int_colnames, emotion_colnames = [], [], []
+
+        # Load AU and emotion from LibreFace
+        if backend in {'libreface', 'both'}:
+            occ_lf, int_lf, emo_lf, occ_cols, int_cols, emo_cols = self.extract_labels_libreface(libreface_dir)
+            au_occ_list.append(occ_lf)
+            au_int_list.append(int_lf)
+            au_occ_colnames += list(occ_cols)
+            au_int_colnames += list(int_cols)
+
+            if emotion_source == 'libreface':
+                emotion_data = emo_lf
+                emotion_colnames = list(emo_cols)
+
+        # Load AU from OpenFace
+        if backend in {'openface', 'both'}:
+            openface_cfg = {'dynamic': [('au_dynamic', '')],
+                            'dynamic_wild': [('au_dynamic_wild', '_wild')],
+                            'static': [('au_static', '_static')],
+                            'static_wild': [('au_static_wild', '_static_wild')]}
+
+            if au_setting not in openface_cfg:
+                raise ValueError(f"Unsupported OPENFACE_AU_SETTING: {au_setting}")
+
+            occ_all, int_all, occ_cols, int_cols = [], [], [], []
+            for subdir, suffix in openface_cfg[au_setting]:
+                occ, intensity, *cols = self.extract_labels_openface(openface_dir, subdir, suffix)
+                occ_all.append(occ)
+                int_all.append(intensity)
+                occ_cols += cols[0]
+                int_cols += cols[1]
+
+            au_occ_list.append(np.concatenate(occ_all, axis=1))
+            au_int_list.append(np.concatenate(int_all, axis=1))
+            au_occ_colnames += occ_cols
+            au_int_colnames += int_cols
+
+        # Ensure AUs were collected
+        if not au_occ_list or not au_int_list:
+            raise ValueError(f"No AU features loaded with backend '{backend}' and AU setting '{au_setting}'")
+
+        # Combine AU features
+        au_occ_all = np.concatenate(au_occ_list, axis=1)
+        au_int_all = np.concatenate(au_int_list, axis=1)
+
+        # Load emotion data from original if not libreface
+        if emotion_source == 'original':
+            if emotion_setting == 'discrete':
+                emotion_data = subject_emotion
+                emotion_colnames = ['amusement', 'disgust']
+            elif emotion_setting == 'vad':
+                emotion_data = subject_vad if include_dominance else subject_vad[:, :2]
+                emotion_colnames = ['arousal', 'valence', 'dominance'] if include_dominance else ['arousal', 'valence']
+            elif emotion_setting == 'both':
+                vad_part = subject_vad if include_dominance else subject_vad[:, :2]
+                vad_cols = ['arousal', 'valence', 'dominance'] if include_dominance else ['arousal', 'valence']
+                emotion_data = np.concatenate([subject_emotion, vad_part], axis=1)
+                emotion_colnames = ['amusement', 'disgust'] + vad_cols
+            else:
+                raise ValueError(f"Unsupported ORIGINAL_EMOTION_SETTING: {emotion_setting}")
+
+        elif emotion_source != 'libreface':
+            raise ValueError(f"Unsupported EMOTION_SOURCE: {emotion_source}")
+
+        # Final validation
+        for label_name, label_data in {'au_occ_all': au_occ_all, 'au_int_all': au_int_all, 'emotion_all': emotion_data}.items():
+            if label_data.shape[0] != frame_count:
+                raise ValueError(f"{label_name} shape mismatch: got {label_data.shape[0]}, expected {frame_count}")
+
+        return au_occ_all, au_int_all, emotion_data, au_occ_colnames, au_int_colnames, emotion_colnames
+
+    def save_combined_label_names(self, ppg_colnames, au_occ_colnames, au_int_colnames, emotion_colnames):
+        """Saves combined column names for all labels used in training."""
+        combined_colnames = pd.Index(ppg_colnames + au_occ_colnames + au_int_colnames + emotion_colnames)
+        self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
     
     def read_video(self, video_file, config_preprocess):
         """
@@ -323,24 +374,32 @@ class MDMERLoader(BaseLoader):
         usecols = au_occ_cols + au_int_cols + emotion_col
         df = pd.read_csv(full_path, usecols=usecols)
 
+        # Map emotion directly onto the DataFrame
+        emotion_mapping = {"Neutral": 0,
+                           "Happiness": 1,
+                           "Sadness": 2,
+                           "Surprise": 3,
+                           "Fear": 4,
+                           "Disgust": 5,
+                           "Anger": 6,
+                           "Contempt": 7}
+        
+        df['facial_expression'] = df['facial_expression'].map(emotion_mapping).fillna(-1).astype(int)
+
         # Extract column groups
         au_occ = df[au_occ_cols]
         au_int = df[au_int_cols]
-        emotion = df[emotion_col]
+        emotion = df[['facial_expression']]
 
-        # Create renamed versions of columns (stored separately, not assigned)
+        # Create renamed versions of columns
         au_occ_column_names = [f'AU{col[3:]}_lf' for col in au_occ_cols]
         au_int_column_names = [f'AU{col[3:-10]}_int_lf' for col in au_int_cols]
         emotion_column_name = ['emotion_lf']
 
-        return (
-            au_occ,
-            au_int,
-            emotion,
-            au_occ_column_names,
-            au_int_column_names,
-            emotion_column_name
-        )
+        return (au_occ, au_int, emotion,
+                au_occ_column_names,
+                au_int_column_names,
+                emotion_column_name)
 
     @staticmethod
     def extract_labels_openface(aucoding_dir, dir_name, colname):
@@ -392,15 +451,14 @@ class MDMERLoader(BaseLoader):
         return label_list
 
     def preprocess(self, frames, phys_labels, psuedo_phys_labels, au_occ, au_int, emotion, config_preprocess):
-        ##########################################
-        ########## NESTED HELPER FUNCTIONS #######
-        ##########################################
+        """Preprocesses frames and labels into big/small clip format with label transformation."""
 
-        # Helper to ensure arrays are 2D (e.g., (N,) -> (N,1))
+        # --------------------------------------
+        # 1. Helper functions
+        # --------------------------------------
         def to_2d(arr):
-            return arr.reshape(-1, 1) if arr.ndim == 1 else arr
+            return arr.reshape(-1, 1) if arr is not None and arr.ndim == 1 else arr
 
-        # Helper to generate transformed video data for BIG/SMALL path
         def generate_data(data_types):
             return np.concatenate([
                 frames if dtype == "Raw"
@@ -410,18 +468,30 @@ class MDMERLoader(BaseLoader):
                 for dtype in data_types
             ], axis=-1)
 
-        ##########################################
-        ########## PREPROCESSING FRAMES ##########
-        ##########################################
+        def transform_label(arr):
+            if arr is None:
+                return None
+            if label_type == "Raw":
+                return arr
+            elif label_type == "DiffNormalized":
+                return self.diff_normalize_label(arr)
+            elif label_type == "Standardized":
+                return self.standardized_label(arr)
+            else:
+                raise ValueError(f"Unsupported label type: {label_type}")
 
+        # --------------------------------------
+        # 2. Frame Preprocessing
+        # --------------------------------------
         crop_cfg = config_preprocess.CROP_FACE
         resize_cfg = config_preprocess.BIGSMALL.RESIZE
         big_types = config_preprocess.BIGSMALL.BIG_DATA_TYPE
         small_types = config_preprocess.BIGSMALL.SMALL_DATA_TYPE
 
-        # Step 1: Crop and resize if enabled
+        # Crop and resize
         if crop_cfg.DO_CROP_FACE:
             frames = self.crop_face_resize(frames,
+                                           crop_cfg.DO_CROP_FACE,
                                            crop_cfg.BACKEND,
                                            crop_cfg.USE_LARGE_FACE_BOX,
                                            crop_cfg.LARGE_BOX_COEF,
@@ -431,11 +501,11 @@ class MDMERLoader(BaseLoader):
                                            resize_cfg.BIG_W,
                                            resize_cfg.BIG_H)
 
-        # Step 2: Generate big and small path data
+        # Generate big/small data paths
         big_data = generate_data(big_types)
         small_data = generate_data(small_types)
 
-        # Step 3: Resize small data
+        # Resize small data
         small_data = self.crop_face_resize(small_data,
                                            crop_cfg.DO_CROP_FACE,
                                            crop_cfg.BACKEND,
@@ -447,49 +517,45 @@ class MDMERLoader(BaseLoader):
                                            resize_cfg.SMALL_W,
                                            resize_cfg.SMALL_H)
 
-        ##########################################
-        ########## PREPROCESSING LABELS ##########
-        ##########################################
-
-        ppg, filtered_ppg = phys_labels[:, 0], phys_labels[:, 1]
+        # --------------------------------------
+        # 3. Label Preprocessing
+        # --------------------------------------
         label_type = config_preprocess.LABEL_TYPE
 
-        label_transform = {"Raw": lambda x: x,
-                           "DiffNormalized": self.diff_normalize_label,
-                           "Standardized": self.standardized_label
-                           }.get(label_type)
+        # Dynamically handle 1D or multi-column PPG
+        phys_cols = phys_labels.shape[1] if phys_labels.ndim > 1 else 1
+        ppg_components = []
 
-        if label_transform is None:
-            raise ValueError(f"Unsupported label type: {label_type}")
+        if phys_cols == 1:  # e.g., raw or filtered only
+            ppg_single = transform_label(phys_labels)
+            ppg_components.append(to_2d(ppg_single))
+        else:  # both
+            for col in range(phys_cols):
+                transformed = transform_label(phys_labels[:, col])
+                ppg_components.append(to_2d(transformed))
 
-        ppg = label_transform(ppg)
-        filtered_ppg = label_transform(filtered_ppg)
-        psuedo_phys_labels = label_transform(psuedo_phys_labels)
+        # Optional pseudo PPG
+        if psuedo_phys_labels is not None:
+            ppg_components.append(to_2d(transform_label(psuedo_phys_labels)))
 
-        ##########################################
-        ########## COMBINE ALL LABELS ############
-        ##########################################
+        # --------------------------------------
+        # 4. Combine All Labels
+        # --------------------------------------
+        label_list = ppg_components + [to_2d(au_occ), to_2d(au_int), to_2d(emotion)]
+        labels = np.concatenate([x for x in label_list if x is not None], axis=1)
 
-        labels = np.concatenate([to_2d(ppg),
-                                 to_2d(filtered_ppg),
-                                 to_2d(psuedo_phys_labels),
-                                 au_occ,
-                                 au_int,
-                                 emotion], axis=1)
-
-        ##########################################
-        ########## CHUNK IF REQUIRED #############
-        ##########################################
-
+        # --------------------------------------
+        # 5. Chunking
+        # --------------------------------------
         if config_preprocess.DO_CHUNK:
             chunk_len = config_preprocess.CHUNK_LENGTH
-            big_clips, small_clips, labels_clips = self.chunk(big_data, small_data, labels, chunk_len)
+            big_clips, small_clips, label_clips = self.chunk(big_data, small_data, labels, chunk_len)
         else:
             big_clips = np.array([big_data])
             small_clips = np.array([small_data])
-            labels_clips = np.array([labels])
+            label_clips = np.array([labels])
 
-        return big_clips, small_clips, labels_clips
+        return big_clips, small_clips, label_clips
 
     def chunk(self, big_frames, small_frames, labels, chunk_len):
         """
@@ -723,6 +789,210 @@ class MDMERLoader(BaseLoader):
 
         # Save the DataFrame to a CSV file at the specified file list path.
         file_list_df.to_csv(self.file_list_path)
+
+    def preprocess_dataset_subprocess_original(self, data_dirs, config_preprocess, i, file_list_dict):
+        """Invoked by preprocess_dataset for multi-process data preprocessing."""
+
+        subject_info = data_dirs[i]
+        subject_path = subject_info['path']
+        saved_filename = subject_info['index']
+
+        # Path setup
+        subject_video = os.path.join(subject_path, "vid.mp4")
+        libreface_dir = os.path.join(subject_path, "facs", "libreface")
+        openface_dir = os.path.join(subject_path, "facs", "openface")
+
+        # Helper to load CSV quickly
+        def load_csv_values(path, col_slice=slice(1, None)):
+            return pd.read_csv(path, skiprows=1, header=None).values[:, col_slice]
+
+        # Batch load labels
+        subject_emotion = load_csv_values(os.path.join(subject_path, "emotion.csv"))
+        subject_vad = load_csv_values(os.path.join(subject_path, "vad.csv"))
+        subject_ppg = load_csv_values(os.path.join(subject_path, "ppg.csv"), col_slice=3)
+
+        # Load frames based on DATA_AUG
+        data_aug = config_preprocess.DATA_AUG
+        if 'None' in data_aug:
+            frames = self.read_video(subject_video, config_preprocess)
+        elif 'Motion' in data_aug:
+            npy_files = glob.glob(os.path.join(subject_path, '*.npy'))
+            frames = self.read_npy_video(npy_files)
+        else:
+            raise ValueError(f'Unsupported DATA_AUG: {data_aug}')
+
+        frame_count = frames.shape[0]
+
+        # Label preprocessing
+        combined_emotion = np.concatenate([subject_emotion, subject_vad], axis=1)
+        phys_labels = self.preprocess_ppg(subject_ppg.flatten(), frame_count)
+
+        psuedo_phys_labels = None
+        if config_preprocess.USE_PSUEDO_PPG_LABEL:
+            psuedo_phys_labels = self.generate_pos_ppg(frames, fps=self.config_data.FS)
+
+        # Extract LibreFace labels
+        au_occ_lf, au_int_lf, emotion_lf, *lf_colnames = self.extract_labels_libreface(libreface_dir)
+
+        # Initialize AU column name lists
+        au_occ_colnames = list(lf_colnames[0])
+        au_int_colnames = list(lf_colnames[1])
+
+        # Extract OpenFace labels
+        openface_labels = {}
+        openface_configs = [
+            ('au_dynamic', ''), 
+            ('au_dynamic_wild', '_wild'), 
+            ('au_static', '_static'), 
+            ('au_static_wild', '_static_wild')
+        ]
+
+        for dir_name, suffix in openface_configs:
+            occ, intensity, *cols = self.extract_labels_openface(openface_dir, dir_name, suffix)
+            openface_labels[f'au_occ_of_{dir_name}'] = occ
+            openface_labels[f'au_int_of_{dir_name}'] = intensity
+            au_occ_colnames.extend(cols[0])
+            au_int_colnames.extend(cols[1])
+
+        # Merge all labels for shape validation
+        labels = {'combined_emotion': combined_emotion,
+                  'phys_labels': phys_labels,
+                  'psuedo_phys_labels': psuedo_phys_labels,
+                  'au_occ_lf': au_occ_lf,
+                  'au_int_lf': au_int_lf,
+                  'emotion_lf': emotion_lf,
+                  **openface_labels}
+
+        mismatched = [name for name, arr in labels.items() if arr is not None and arr.shape[0] != frame_count]
+        if mismatched:
+            raise ValueError(f"{saved_filename} shape mismatch: {', '.join(mismatched)} (expected {frame_count})")
+
+        # Save label names once
+        if self.dataset_name == "train" and i == 0:
+            emotion_label_names = ['amusement', 'disgust', 'arousal', 'valence', 'dominance']
+
+            combined_colnames = pd.Index(['ppg', 'filtered_ppg', 'pos_ppg'] + 
+                                         au_occ_colnames + 
+                                         au_int_colnames + 
+                                         emotion_label_names + 
+                                         list(lf_colnames[2]))
+            
+            self.save_label_names(combined_colnames, os.path.dirname(self.raw_data_path))
+
+        # Merge AU features
+        au_occ_all = np.concatenate([au_occ_lf] + [v for k, v in openface_labels.items() if k.startswith('au_occ_of_')], axis=1)
+        au_int_all = np.concatenate([au_int_lf] + [v for k, v in openface_labels.items() if k.startswith('au_int_of_')], axis=1)
+
+        # Merge all emotion labels
+        all_emotion = np.concatenate([combined_emotion, emotion_lf], axis=1)
+
+        # Main preprocessing
+        big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, 
+                                                              au_occ_all, au_int_all, all_emotion, config_preprocess)
+
+        # Save processed clips
+        input_name_list, _ = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
+        file_list_dict[i] = input_name_list
+
+    def preprocess_orig(self, frames, phys_labels, psuedo_phys_labels, au_occ, au_int, emotion, config_preprocess):
+        ##########################################
+        ########## NESTED HELPER FUNCTIONS #######
+        ##########################################
+
+        # Helper to ensure arrays are 2D (e.g., (N,) -> (N,1))
+        def to_2d(arr):
+            return arr.reshape(-1, 1) if arr.ndim == 1 else arr
+
+        # Helper to generate transformed video data for BIG/SMALL path
+        def generate_data(data_types):
+            return np.concatenate([
+                frames if dtype == "Raw"
+                else self.diff_normalize_data(frames) if dtype == "DiffNormalized"
+                else self.standardized_data(frames) if dtype == "Standardized"
+                else (_ for _ in ()).throw(ValueError(f"Unsupported data type: {dtype}"))
+                for dtype in data_types
+            ], axis=-1)
+
+        ##########################################
+        ########## PREPROCESSING FRAMES ##########
+        ##########################################
+
+        crop_cfg = config_preprocess.CROP_FACE
+        resize_cfg = config_preprocess.BIGSMALL.RESIZE
+        big_types = config_preprocess.BIGSMALL.BIG_DATA_TYPE
+        small_types = config_preprocess.BIGSMALL.SMALL_DATA_TYPE
+
+        # Step 1: Crop and resize if enabled
+        if crop_cfg.DO_CROP_FACE:
+            frames = self.crop_face_resize(frames,
+                                           crop_cfg.BACKEND,
+                                           crop_cfg.USE_LARGE_FACE_BOX,
+                                           crop_cfg.LARGE_BOX_COEF,
+                                           crop_cfg.DETECTION.DO_DYNAMIC_DETECTION,
+                                           crop_cfg.DETECTION.DYNAMIC_DETECTION_FREQUENCY,
+                                           crop_cfg.DETECTION.USE_MEDIAN_FACE_BOX,
+                                           resize_cfg.BIG_W,
+                                           resize_cfg.BIG_H)
+
+        # Step 2: Generate big and small path data
+        big_data = generate_data(big_types)
+        small_data = generate_data(small_types)
+
+        # Step 3: Resize small data
+        small_data = self.crop_face_resize(small_data,
+                                           crop_cfg.DO_CROP_FACE,
+                                           crop_cfg.BACKEND,
+                                           crop_cfg.USE_LARGE_FACE_BOX,
+                                           crop_cfg.LARGE_BOX_COEF,
+                                           crop_cfg.DETECTION.DO_DYNAMIC_DETECTION,
+                                           crop_cfg.DETECTION.DYNAMIC_DETECTION_FREQUENCY,
+                                           crop_cfg.DETECTION.USE_MEDIAN_FACE_BOX,
+                                           resize_cfg.SMALL_W,
+                                           resize_cfg.SMALL_H)
+
+        ##########################################
+        ########## PREPROCESSING LABELS ##########
+        ##########################################
+
+        ppg, filtered_ppg = phys_labels[:, 0], phys_labels[:, 1]
+        label_type = config_preprocess.LABEL_TYPE
+
+        label_transform = {"Raw": lambda x: x,
+                           "DiffNormalized": self.diff_normalize_label,
+                           "Standardized": self.standardized_label
+                           }.get(label_type)
+
+        if label_transform is None:
+            raise ValueError(f"Unsupported label type: {label_type}")
+
+        ppg = label_transform(ppg)
+        filtered_ppg = label_transform(filtered_ppg)
+        psuedo_phys_labels = label_transform(psuedo_phys_labels)
+
+        ##########################################
+        ########## COMBINE ALL LABELS ############
+        ##########################################
+
+        labels = np.concatenate([to_2d(ppg),
+                                 to_2d(filtered_ppg),
+                                 to_2d(psuedo_phys_labels),
+                                 au_occ,
+                                 au_int,
+                                 emotion], axis=1)
+
+        ##########################################
+        ########## CHUNK IF REQUIRED #############
+        ##########################################
+
+        if config_preprocess.DO_CHUNK:
+            chunk_len = config_preprocess.CHUNK_LENGTH
+            big_clips, small_clips, labels_clips = self.chunk(big_data, small_data, labels, chunk_len)
+        else:
+            big_clips = np.array([big_data])
+            small_clips = np.array([small_data])
+            labels_clips = np.array([labels])
+
+        return big_clips, small_clips, labels_clips
 
 class UBFCrPPGLoader(BaseLoader):
     """The data loader for the UBFC-rPPG dataset."""

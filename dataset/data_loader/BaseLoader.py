@@ -201,7 +201,7 @@ class BaseLoader(Dataset):
 
             # Start new processes if below the quota
             while len(processes) < multi_process_quota and i < file_num:
-                p = Process(target=self.preprocess_dataset_subprocess, 
+                p = Process(target=self.preprocess_dataset_subprocess_variant1, 
                             args=(data_dirs, config_preprocess, i, file_list_dict))
                 p.start()
                 processes.append(p)
@@ -276,7 +276,7 @@ class BaseLoader(Dataset):
         return frames_clips, bvps_clips
 
     def crop_face_resize(self, frames, use_face_detection, backend, use_larger_box, larger_box_coef,
-                     use_dynamic_detection, detection_freq, use_median_box, width, height):
+                         use_dynamic_detection, detection_freq, use_median_box, width, height):
         """
         Crop and resize face regions in video frames.
         """
