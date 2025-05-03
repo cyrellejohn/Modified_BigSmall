@@ -118,7 +118,7 @@ class MDMERLoader(BaseLoader):
         # Subject info
         subject_info = data_dirs[i]
         subject_path = subject_info['path']
-        saved_filename = subject_info['index']
+        subject_number = subject_info['index']
         subject_video = os.path.join(subject_path, "vid.mp4")
         libreface_dir = os.path.join(subject_path, "facs", "libreface")
         openface_dir = os.path.join(subject_path, "facs", "openface")
@@ -175,8 +175,8 @@ class MDMERLoader(BaseLoader):
         big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, 
                                                               au_occ_all, au_int_all, emotion_all, config_preprocess)
 
-        input_name_list, _ = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
-        file_list_dict[i] = input_name_list
+        input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, subject_number)
+        file_list_dict[i] = input_name_list + [label_name_list]
 
     def extract_face_labels(self, backend, au_setting, emotion_source, emotion_setting, include_dominance, 
                             libreface_dir, openface_dir, subject_emotion, subject_vad, frame_count):
@@ -587,44 +587,29 @@ class MDMERLoader(BaseLoader):
 
     def save_multi_process(self, big_clips, small_clips, label_clips, filename):
         """
-        Saves preprocessed video frames and corresponding labels to disk in a multi-process environment.
-
-        Args:
-            big_clips (np.array): Array of big video frame clips to be saved.
-            small_clips (np.array): Array of small video frame clips to be saved.
-            label_clips (np.array): Array of labels corresponding to each video frame clip.
-            filename (str): Base filename to use for saving the clips.
-
-        Returns:
-            tuple: Two lists containing the paths of the saved input and label files, respectively.
+        Efficiently saves big/small/label clips to .npy files using np.memmap for memory safety.
         """
+
         cached_path = self.cached_path
         os.makedirs(cached_path, exist_ok=True)
 
-        num_clips = len(label_clips)
-        assert num_clips == len(big_clips) == len(small_clips), \
-            f"Mismatch in list lengths: big={len(big_clips)}, small={len(small_clips)}, label={num_clips}"
+        # Sanity check
+        if not (len(big_clips) == len(small_clips) == len(label_clips)):
+            raise ValueError("Mismatched number of samples in input arrays.")
 
-        input_paths = [None] * num_clips
-        label_paths = [None] * num_clips
+        # File paths
+        big_path = os.path.join(cached_path, f"{filename}_big.npy")
+        small_path = os.path.join(cached_path, f"{filename}_small.npy")
+        label_path = os.path.join(cached_path, f"{filename}_label.npy")
 
-        for i, (big_clip, small_clip, label_clip) in enumerate(zip(big_clips, small_clips, label_clips)):
-            input_path = os.path.join(cached_path, f"{filename}_input{i}.pickle")
-            label_path = os.path.join(cached_path, f"{filename}_label{i}.npy")
+        # Save using memory-mapped I/O
+        np.memmap(big_path, dtype=np.float32, mode='w+', shape=big_clips.shape)[:] = big_clips
+        np.memmap(small_path, dtype=np.float32, mode='w+', shape=small_clips.shape)[:] = small_clips
+        np.memmap(label_path, dtype=np.float32, mode='w+', shape=label_clips.shape)[:] = label_clips
 
-            # Save label as .npy
-            np.save(label_path, label_clip)
+        return [big_path, small_path], label_path
 
-            # Save frames as .pickle
-            with open(input_path, 'wb') as f:
-                pickle.dump({0: big_clip, 1: small_clip}, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            input_paths[i] = input_path
-            label_paths[i] = label_path
-
-        return input_paths, label_paths
-
-    def load_preprocessed_data(self):
+    def load_preprocessed_data_original(self):
         """Loads preprocessed data file paths and their corresponding labels from a CSV file.
 
         This method reads a CSV file containing a list of preprocessed data files, extracts the file paths,
@@ -659,6 +644,31 @@ class MDMERLoader(BaseLoader):
 
         # Calculate and store the length of the preprocessed dataset
         self.preprocessed_data_len = len(inputs)
+
+    def load_preprocessed_data(self):
+        """
+        Efficiently loads preprocessed file paths from a CSV file with columns: 'big', 'small', 'label'.
+        Stores:
+            - self.inputs: list of (big_path, small_path) tuples
+            - self.labels: list of label paths
+            - self.preprocessed_data_len: total number of samples
+        Raises:
+            ValueError: If required columns are missing or data is empty.
+        """
+        file_list_df = pd.read_csv(self.file_list_path, usecols=['big', 'small', 'label'])
+
+        if file_list_df.empty:
+            raise ValueError(f"{self.dataset_name}: CSV file is empty.")
+
+        if file_list_df.isnull().any().any():
+            raise ValueError(f"{self.dataset_name}: CSV file contains NaN values in required columns.")
+
+        self.inputs = list(zip(file_list_df['big'].values, file_list_df['small'].values))
+        self.labels = file_list_df['label'].tolist()
+        self.preprocessed_data_len = len(self.inputs)
+
+        if self.preprocessed_data_len == 0:
+            raise ValueError(f"{self.dataset_name}: No file paths found in CSV.")
 
     def __getitem__(self, index):
         """
@@ -795,7 +805,7 @@ class MDMERLoader(BaseLoader):
 
         subject_info = data_dirs[i]
         subject_path = subject_info['path']
-        saved_filename = subject_info['index']
+        subject_number = subject_info['index']
 
         # Path setup
         subject_video = os.path.join(subject_path, "vid.mp4")
@@ -865,7 +875,7 @@ class MDMERLoader(BaseLoader):
 
         mismatched = [name for name, arr in labels.items() if arr is not None and arr.shape[0] != frame_count]
         if mismatched:
-            raise ValueError(f"{saved_filename} shape mismatch: {', '.join(mismatched)} (expected {frame_count})")
+            raise ValueError(f"{subject_number} shape mismatch: {', '.join(mismatched)} (expected {frame_count})")
 
         # Save label names once
         if self.dataset_name == "train" and i == 0:
@@ -891,7 +901,7 @@ class MDMERLoader(BaseLoader):
                                                               au_occ_all, au_int_all, all_emotion, config_preprocess)
 
         # Save processed clips
-        input_name_list, _ = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
+        input_name_list, _ = self.save_multi_process(big_clips, small_clips, label_clips, subject_number)
         file_list_dict[i] = input_name_list
 
     def preprocess_orig(self, frames, phys_labels, psuedo_phys_labels, au_occ, au_int, emotion, config_preprocess):
@@ -994,6 +1004,45 @@ class MDMERLoader(BaseLoader):
 
         return big_clips, small_clips, labels_clips
 
+    def save_multi_process_original(self, big_clips, small_clips, label_clips, filename):
+        """
+        Saves preprocessed video frames and corresponding labels to disk in a multi-process environment.
+
+        Args:
+            big_clips (np.array): Array of big video frame clips to be saved.
+            small_clips (np.array): Array of small video frame clips to be saved.
+            label_clips (np.array): Array of labels corresponding to each video frame clip.
+            filename (str): Base filename to use for saving the clips.
+
+        Returns:
+            tuple: Two lists containing the paths of the saved input and label files, respectively.
+        """
+        cached_path = self.cached_path
+        os.makedirs(cached_path, exist_ok=True)
+
+        num_clips = len(label_clips)
+        assert num_clips == len(big_clips) == len(small_clips), \
+            f"Mismatch in list lengths: big={len(big_clips)}, small={len(small_clips)}, label={num_clips}"
+
+        input_paths = [None] * num_clips
+        label_paths = [None] * num_clips
+
+        for i, (big_clip, small_clip, label_clip) in enumerate(zip(big_clips, small_clips, label_clips)):
+            input_path = os.path.join(cached_path, f"{filename}_input{i}.pickle")
+            label_path = os.path.join(cached_path, f"{filename}_label{i}.npy")
+
+            # Save label as .npy
+            np.save(label_path, label_clip)
+
+            # Save frames as .pickle
+            with open(input_path, 'wb') as f:
+                pickle.dump({0: big_clip, 1: small_clip}, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            input_paths[i] = input_path
+            label_paths[i] = label_path
+
+        return input_paths, label_paths
+
 class UBFCrPPGLoader(BaseLoader):
     """The data loader for the UBFC-rPPG dataset."""
 
@@ -1080,7 +1129,7 @@ class UBFCrPPGLoader(BaseLoader):
 
         # Extract the filename and index for saving processed data
         filename = os.path.split(data_dirs[i]['path'])[-1]
-        saved_filename = data_dirs[i]['index']
+        subject_number = data_dirs[i]['index']
 
         # EXTRACT THE FRAMES FROM THE INPUT VIDEO OR .NPY FILES
         if 'None' in config_preprocess.DATA_AUG:
@@ -1122,7 +1171,7 @@ class UBFCrPPGLoader(BaseLoader):
         big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, au_occ, au_int, config_preprocess)
         
         # Save the processed data with its file chunks and update the file list dictionary
-        input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, saved_filename)
+        input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, subject_number)
         file_list_dict[i] = input_name_list
 
     def read_video(self, video_file, config_preprocess):

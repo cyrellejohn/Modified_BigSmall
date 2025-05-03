@@ -323,101 +323,46 @@ class BaseLoader(Dataset):
 
     def face_detection(self, frame, backend, use_larger_box=False, larger_box_coef=1.0):
         """
-        Detects a face in a given video frame using specified backend and optionally enlarges the detected face box.
+        Detects a face in a given video frame using the specified backend and optionally enlarges the detected face box.
 
         Args:
-            frame (np.array): The video frame in which to detect a face.
-            backend (str): The face detection backend to use. Options are:
-                - "HC": OpenCV's Haar Cascade.
-                - "RF": TensorFlow-based RetinaFace.
-            use_larger_box (bool, optional): Whether to enlarge the detected face box. Defaults to False.
-            larger_box_coef (float, optional): The coefficient by which to enlarge the face box. Defaults to 1.0.
+            frame (np.ndarray): The video frame in which to detect a face.
+            backend (str): The face detection backend to use. Currently supported: "HC" (Haar Cascade).
+            use_larger_box (bool): Whether to enlarge the detected face box.
+            larger_box_coef (float): The factor to enlarge the face box by.
 
         Returns:
-            list: Coordinates of the detected face box in the format [x_coord, y_coord, width, height].
-
-        Raises:
-            ValueError: If an unsupported backend is specified.
-
-        Notes:
-            - For "HC" backend, the method uses a pre-trained Haar Cascade model to detect faces.
-            - For "RF" backend, the method uses RetinaFace to detect faces, which can utilize both CPU and GPU.
-            - If no face is detected, the entire frame is returned as the face box.
-            - If multiple faces are detected with "HC", the largest face is selected.
-            - The face box can be enlarged by setting `use_larger_box` to True and specifying `larger_box_coef`.
+            list: Coordinates [x, y, width, height] of the detected (or fallback) face box.
         """
-        if backend == "HC":
-            # Use OpenCV's Haar Cascade algorithm implementation for face detection
-            # This should only utilize the CPU
-            detector = cv2.CascadeClassifier('./dataset/haarcascade_frontalface_default.xml') # Alternative implementation: import cv2 then print(cv2.data.haarcascades)
+        if backend != "HC":
+            raise ValueError(f"Unsupported face detection backend: {backend}")
 
-            # Computed face_zone(s) are in the form [x_coord, y_coord, width, height]
-            # (x,y) corresponds to the top-left corner of the zone to define using
-            # the computed width and height.
-            face_zone = detector.detectMultiScale(frame)
+        # Use OpenCV Haar Cascade for face detection
+        detector = cv2.CascadeClassifier('./dataset/haarcascade_frontalface_default.xml')
+        frame_uint8 = frame[:, :, :3].astype(np.uint8)
 
-            if len(face_zone) < 1:
-                print("ERROR: No Face Detected")
-                # If no face is detected, set the face box coordinates to cover the entire frame.
-                face_box_coor = [0, 0, frame.shape[1], frame.shape[0]]
-
-            elif len(face_zone) >= 2:
-                # Find the index of the largest face zone
-                # The face zones are boxes, so the width and height are the same
-                max_width_index = np.argmax(face_zone[:, 2])  # Index of maximum width
-                face_box_coor = face_zone[max_width_index]
-                print("Warning: More than one faces are detected. Only cropping the biggest one.")
-            else:
-                face_box_coor = face_zone[0]
-        
-        ''' RETINA FACE | NOT FULLY IMPLEMENTED | NOT FINAL
-        elif backend == "RF":
-            # Use a TensorFlow-based RetinaFace implementation for face detection
-            # This utilizes both the CPU and GPU
-            res = RetinaFace.detect_faces(frame)
-
-            if len(res) > 0:
-                # Pick the highest score
-                highest_score_face = max(res.values(), key=lambda x: x['score'])
-                face_zone = highest_score_face['facial_area']
-
-                # This implementation of RetinaFace returns a face_zone in the
-                # form [x_min, y_min, x_max, y_max] that corresponds to the 
-                # corners of a face zone
-                x_min, y_min, x_max, y_max = face_zone
-
-                # Convert to this toolbox's expected format
-                # Expected format: [x_coord, y_coord, width, height]
-                x = x_min
-                y = y_min
-                width = x_max - x_min
-                height = y_max - y_min
-
-                # Find the center of the face zone
-                center_x = x + width // 2
-                center_y = y + height // 2
-                
-                # Determine the size of the square (use the maximum of width and height)
-                square_size = max(width, height)
-                
-                # Calculate the new coordinates for a square face zone
-                new_x = center_x - (square_size // 2)
-                new_y = center_y - (square_size // 2)
-                face_box_coor = [new_x, new_y, square_size, square_size]
-            else:
-                print("ERROR: No Face Detected")
-                face_box_coor = [0, 0, frame.shape[0], frame.shape[1]]
-        
+        faces = detector.detectMultiScale(frame_uint8)
+        if len(faces) == 0:
+            print("ERROR: No Face Detected")
+            x, y, w, h = 0, 0, frame.shape[1], frame.shape[0]
         else:
-            raise ValueError("Unsupported face detection backend!")
-        '''
-        if use_larger_box:
-            face_box_coor[0] = max(0, face_box_coor[0] - (larger_box_coef - 1.0) / 2 * face_box_coor[2])
-            face_box_coor[1] = max(0, face_box_coor[1] - (larger_box_coef - 1.0) / 2 * face_box_coor[3])
-            face_box_coor[2] = larger_box_coef * face_box_coor[2]
-            face_box_coor[3] = larger_box_coef * face_box_coor[3]
-        
-        return face_box_coor
+            if len(faces) > 1:
+                print("Warning: Multiple faces detected. Selecting the largest one.")
+                face = max(faces, key=lambda f: f[2] * f[3])  # area = width * height
+            else:
+                face = faces[0]
+            x, y, w, h = face
+
+        # Optionally enlarge the face box
+        if use_larger_box and larger_box_coef > 1.0:
+            dw = (larger_box_coef - 1.0) * w / 2
+            dh = (larger_box_coef - 1.0) * h / 2
+            x = max(0, int(x - dw))
+            y = max(0, int(y - dh))
+            w = int(w * larger_box_coef)
+            h = int(h * larger_box_coef)
+
+        return [x, y, w, h]
 
     @staticmethod
     def diff_normalize_data(data):
@@ -430,74 +375,68 @@ class BaseLoader(Dataset):
         Returns:
             np.ndarray: Difference-normalized and standardized video data (float32).
         """
-        # Ensure input is float32
+        # Ensure input is float32 for consistency and safety
         data = data.astype(np.float32)
 
-        # Compute difference and summation between consecutive frames
+        # Vectorized difference and sum between consecutive frames
         diff = data[1:] - data[:-1]
-        summation = data[1:] + data[:-1] + 1e-7  # prevent division by zero
+        summation = data[1:] + data[:-1] + 1e-7  # Avoid division by zero
 
-        # Normalize the differences
-        diff_normalized = np.divide(diff, summation, where=summation != 0)
+        # Element-wise division (safe and fast)
+        diff_normalized = np.divide(diff, summation, out=np.zeros_like(diff), where=summation != 0)
 
-        # Normalize by standard deviation
+        # Normalize by standard deviation (skip if std is 0)
         std = np.std(diff_normalized, dtype=np.float32)
-        if std != 0:
-            diff_normalized = diff_normalized / std
+        if std > 0:
+            diff_normalized /= std
 
-        # Replace any NaNs with zeros
+        # Replace any NaNs or infs (just in case)
         np.nan_to_num(diff_normalized, copy=False)
 
-        # Pad to match original number of frames, using the same dtype
-        padding = np.zeros((1, *data.shape[1:]), dtype=diff_normalized.dtype)
+        # Pad with a single zero-frame to match original sequence length
+        padding = np.zeros((1, *data.shape[1:]), dtype=np.float32)
         result = np.concatenate((diff_normalized, padding), axis=0)
 
-        return result.astype(np.float32)  # Final dtype guaranteed
+        return result
 
     @staticmethod
     def standardized_data(data):
-        """
-        Z-score standardization for video data.
-
-        Args:
-            data (np.ndarray): The input video data to be standardized.
-
-        Returns:
-            np.ndarray: The standardized video data.
-        """
+        """Z-score standardization for video data."""
         mean = np.mean(data)
         std = np.std(data)
 
-        # Avoid division by zero by checking if std is non-zero
-        if std == 0:
-            return np.zeros_like(data, dtype=np.float32)
+        if std == 0 or np.isnan(std):
+            return np.zeros_like(data)
 
-        # Perform standardization and handle NaNs (if any)
         standardized = (data - mean) / std
-        np.nan_to_num(standardized, copy=False)  # replaces NaNs with 0 in-place
-
-        return standardized.astype(np.float32)
+        np.nan_to_num(standardized, copy=False)  # Replace NaNs/infs in-place
+        return standardized
 
     @staticmethod
     def diff_normalize_label(label):
         """
-        Calculate the discrete difference in labels along the time-axis and normalize by its standard deviation.
-        Returns an array of the same length as the input.
+        Compute the first-order difference of the label along the time axis and normalize it.
+        
+        Returns:
+            np.ndarray: Standard deviation-normalized difference label with zero-padding at the end.
         """
-        # Compute discrete difference
+        # Compute difference
         diff_label = np.diff(label, axis=0)
 
-        # Compute standard deviation once
+        # Standard deviation (avoid divide by zero)
         std = np.std(diff_label)
-        if std == 0 or np.isnan(std):
-            normalized = np.zeros_like(label[:-1])
+        if std > 0:
+            diff_label /= std
         else:
-            normalized = diff_label / std
+            diff_label = np.zeros_like(diff_label)
 
-        # Pad with zero to match original length
-        result = np.concatenate([normalized, [0]])
+        # Pad the last element to maintain shape consistency
+        diff_label = np.concatenate([diff_label, np.zeros((1,) + diff_label.shape[1:], dtype=diff_label.dtype)], axis=0)
 
-        return result
+        # Ensure NaNs are removed (though should be unnecessary now)
+        np.nan_to_num(diff_label, copy=False)
+
+        return diff_label
 
     @staticmethod
     def standardized_label(label):
@@ -508,7 +447,8 @@ class BaseLoader(Dataset):
         if std == 0 or np.isnan(std):
             return np.zeros_like(label)
 
-        return (label - mean) / std
+        label = (label - mean) / std
+        return np.nan_to_num(label, nan=0.0)
 
     def chunk(self, frames, bvps, chunk_length):
         """
@@ -533,19 +473,6 @@ class BaseLoader(Dataset):
             bvps[i * chunk_length:(i + 1) * chunk_length]) 
             for i in range(clip_num)
         ]))
-
-        ''' 
-        ADD THIS IN THE FUTURE IF WE WANT TO HANDLE THE REMAINING FRAMES
-        # Handle any remaining frames that don't fit into a complete chunk
-        if frames.shape[0] % chunk_length != 0:
-            start_index = clip_num * chunk_length
-            frames_clips.append(frames[start_index:])
-        
-        ADD THIS IN THE FUTURE IF WE WANT TO HANDLE THE REMAINING FRAMES
-        if bvps.shape[0] % chunk_length != 0:
-            start_index = clip_num * chunk_length
-            bvps_clips.append(bvps[start_index:])
-        '''
         
         # Return the chunks as numpy arrays
         return frames_clips, bvps_clips
@@ -595,7 +522,7 @@ class BaseLoader(Dataset):
         # Return the lists of saved file paths
         return input_path_name_list, label_path_name_list
 
-    def build_file_list(self, file_list_dict):
+    def build_file_list_original(self, file_list_dict):
         """
         Build a list of files used by the dataloader for the data split. Eg. list of files used for 
         train / val / test. Also saves the list to a .csv file.
@@ -627,6 +554,34 @@ class BaseLoader(Dataset):
         
         # Save the DataFrame to a CSV file at the specified file list path
         file_list_df.to_csv(self.file_list_path)
+
+    def build_file_list(self, file_list_dict):
+        """
+        Builds and saves a structured CSV file listing paths to 'big', 'small', and 'label' files.
+
+        Args:
+            file_list_dict (dict): Mapping from process ID to a list of [big_path, small_path, label_path].
+
+        Raises:
+            ValueError: If any entry is malformed or if the final list is empty.
+        """
+        # Validate and collect all valid entries
+        file_rows = [paths for pid, paths in file_list_dict.items()
+                     if isinstance(paths, list) and len(paths) == 3]
+
+        # Check for invalid entries
+        if len(file_rows) != len(file_list_dict):
+            invalid_pids = [pid for pid, paths in file_list_dict.items() 
+                            if not isinstance(paths, list) or len(paths) != 3]
+            raise ValueError(f"{self.dataset_name}: Invalid file entries for processes: {invalid_pids}")
+
+        if not file_rows:
+            raise ValueError(f"{self.dataset_name}: No valid files found in file list.")
+
+        # Save to CSV
+        df = pd.DataFrame(file_rows, columns=['big', 'small', 'label'])
+        os.makedirs(os.path.dirname(self.file_list_path) or '.', exist_ok=True)
+        df.to_csv(self.file_list_path, index=False)
 
     def load_preprocessed_data(self):
         """Loads preprocessed data file paths and their corresponding labels from a CSV file.
