@@ -54,10 +54,6 @@ class MDMERLoader(BaseLoader):
         """
         # Call the initializer of the superclass BaseLoader with the provided arguments
         super().__init__(name, data_path, config_data)
-
-        # Initialize label names and dtype
-        self.label_names = None
-        self.label_dtype = None
     
     def get_raw_data(self, data_path):
         """Returns data directories under the path of MDMER dataset"""
@@ -174,9 +170,6 @@ class MDMERLoader(BaseLoader):
         # Save column names once
         if self.dataset_name == "train" and i == 0:
             self.save_combined_label_names(ppg_colnames, au_occ_colnames, au_int_colnames, emotion_colnames)
-
-            self.label_names = ppg_colnames + au_occ_colnames + au_int_colnames + emotion_colnames
-            self.label_dtype = self.get_label_dtype()
 
         # Final preprocessing and save
         big_clips, small_clips, label_clips = self.preprocess(frames, phys_labels, psuedo_phys_labels, 
@@ -449,6 +442,7 @@ class MDMERLoader(BaseLoader):
         with open(full_path, "w") as file:
             file.write('\n'.join(data) + '\n')
 
+    @staticmethod
     def load_label_names(label_list_path):
         full_path = os.path.join(label_list_path, "label_list.txt")
 
@@ -592,60 +586,72 @@ class MDMERLoader(BaseLoader):
 
         return big_clips, small_clips, labels_clips
 
-    def get_label_dtype(self):
+    @staticmethod
+    def get_label_dtype(label_names):
         """
-        Constructs a structured NumPy dtype based on self.label_names and the following rules:
+        Constructs a structured NumPy dtype based on label names and the following rules:
 
         - If the label contains 'AU' and does NOT contain 'int' → uint8 ('u1')
         - If the label is in ['emotion_lf', 'amusement', 'disgust', 'arousal', 'valence', 'dominance'] → uint8 ('u1')
         - Otherwise → float32 ('f4')
 
-        Returns:
-            np.dtype: A structured dtype suitable for saving/loading structured arrays
-        """
-        if not hasattr(self, 'label_names') or self.label_names is None:
-            raise RuntimeError("self.label_names must be set before calling get_label_dtype.")
+        Args:
+            label_names (list of str): The label field names
 
+        Returns:
+            np.dtype: Structured dtype
+        """
         emotion_set = {"emotion_lf", "amusement", "disgust", "arousal", "valence", "dominance"}
 
         dtype_fields = [
             (name, 'u1') if ("AU" in name and "int" not in name) or name in emotion_set else (name, 'f4')
-            for name in self.label_names]
+            for name in label_names]
 
         return np.dtype(dtype_fields)
 
     def save_multi_process(self, big_clips, small_clips, label_clips, filename):
         """
         Saves big/small/label clips to .npy files using np.memmap for memory safety.
-        Uses self.label_names and self.label_dtype set during i == 0.
+        Loads label names from label_list.txt and constructs dtype inline.
+        
+        Args:
+            big_clips (np.ndarray): Shape (num_clips, chunk_len, H, W, C) or similar.
+            small_clips (np.ndarray): Same shape as big_clips, but smaller resolution.
+            label_clips (np.ndarray): Shape (num_clips, chunk_len, num_labels).
+            filename (str): Output file prefix.
+            
+        Returns:
+            input_paths (list): [big_path, small_path]
+            label_path (str): Path to saved label memmap file
         """
+        # Load label names and get structured dtype
+        label_names = self.load_label_names(os.path.dirname(self.raw_data_path))
+        label_dtype = self.get_label_dtype(label_names)
 
-        if self.label_names is None or self.label_dtype is None:
-            raise RuntimeError("label_names or label_dtype is not initialized")
-                               
-        if label_clips.shape[1] != len(self.label_names):
-            raise ValueError(f"label_clips has {label_clips.shape[1]} columns, "
-                             f"but expected {len(self.label_names)} from label_names.")
+        # Validate shape
+        if label_clips.ndim != 3 or label_clips.shape[2] != len(label_names):
+            raise ValueError(f"label_clips must be 3D with shape [clips, chunk_len, {len(label_names)}]. Got: {label_clips.shape}")
 
         cached_path = self.cached_path
         os.makedirs(cached_path, exist_ok=True)
 
-        # Construct file paths
+        # Define file paths
         big_path = os.path.join(cached_path, f"{filename}_big.npy")
         small_path = os.path.join(cached_path, f"{filename}_small.npy")
         label_path = os.path.join(cached_path, f"{filename}_label.npy")
 
-        # Save big and small clips via memory mapping
+        # Save big and small clips using memmap
         for data, path in zip([big_clips, small_clips], [big_path, small_path]):
             mmap = np.memmap(path, dtype=np.float32, mode='w+', shape=data.shape)
             mmap[:] = data
             mmap.flush()
 
-        # Create structured label array
-        structured_labels = np.core.records.fromarrays(label_clips.T, dtype=self.label_dtype)
+        # Reshape label clips: (num_clips * chunk_len, num_labels)
+        reshaped_labels = label_clips.reshape(-1, label_clips.shape[2])
 
-        # Save structured labels
-        label_mmap = np.memmap(label_path, dtype=self.label_dtype, mode='w+', shape=(len(label_clips),))
+        # Create structured array and save using memmap
+        structured_labels = np.core.records.fromarrays(reshaped_labels.T, dtype=label_dtype)
+        label_mmap = np.memmap(label_path, dtype=label_dtype, mode='w+', shape=(len(structured_labels),))
         label_mmap[:] = structured_labels
         label_mmap.flush()
 
