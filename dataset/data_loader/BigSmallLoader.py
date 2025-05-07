@@ -611,49 +611,45 @@ class MDMERLoader(BaseLoader):
 
     def save_multi_process(self, big_clips, small_clips, label_clips, filename):
         """
-        Saves big/small/label clips to .npy files using np.memmap for memory safety.
+        Saves big/small/label clips to .npy files using np.save (mmap-compatible).
         Loads label names from label_list.txt and constructs dtype inline.
-        
+
         Args:
             big_clips (np.ndarray): Shape (num_clips, chunk_len, H, W, C) or similar.
             small_clips (np.ndarray): Same shape as big_clips, but smaller resolution.
             label_clips (np.ndarray): Shape (num_clips, chunk_len, num_labels).
             filename (str): Output file prefix.
-            
+
         Returns:
             input_paths (list): [big_path, small_path]
-            label_path (str): Path to saved label memmap file
+            label_path (str): Path to saved label .npy file
         """
-        # Load label names and get structured dtype
+        # Load label names and create structured dtype
         label_names = self.load_label_names(os.path.dirname(self.raw_data_path))
         label_dtype = self.get_label_dtype(label_names)
 
-        # Validate shape
+        # Validate label shape
         if label_clips.ndim != 3 or label_clips.shape[2] != len(label_names):
             raise ValueError(f"label_clips must be 3D with shape [clips, chunk_len, {len(label_names)}]. Got: {label_clips.shape}")
 
+        # Output paths
         cached_path = self.cached_path
         os.makedirs(cached_path, exist_ok=True)
 
-        # Define file paths
         big_path = os.path.join(cached_path, f"{filename}_big.npy")
         small_path = os.path.join(cached_path, f"{filename}_small.npy")
         label_path = os.path.join(cached_path, f"{filename}_label.npy")
 
-        # Save big and small clips using memmap
-        for data, path in zip([big_clips, small_clips], [big_path, small_path]):
-            mmap = np.memmap(path, dtype=np.float32, mode='w+', shape=data.shape)
-            mmap[:] = data
-            mmap.flush()
+        # Save big and small clips as float32 (mmap-compatible)
+        np.save(big_path, big_clips.astype(np.float32))
+        np.save(small_path, small_clips.astype(np.float32))
 
-        # Reshape label clips: (num_clips * chunk_len, num_labels)
+        # Reshape and convert labels to structured array
         reshaped_labels = label_clips.reshape(-1, label_clips.shape[2])
-
-        # Create structured array and save using memmap
         structured_labels = np.core.records.fromarrays(reshaped_labels.T, dtype=label_dtype)
-        label_mmap = np.memmap(label_path, dtype=label_dtype, mode='w+', shape=(len(structured_labels),))
-        label_mmap[:] = structured_labels
-        label_mmap.flush()
+
+        # Save structured label array
+        np.save(label_path, structured_labels)
 
         return [big_path, small_path], label_path
 
