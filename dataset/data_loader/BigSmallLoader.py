@@ -176,7 +176,7 @@ class MDMERLoader(BaseLoader):
                                                               au_occ_all, au_int_all, emotion_all, config_preprocess)
 
         input_name_list, label_name_list = self.save_multi_process(big_clips, small_clips, label_clips, subject_number)
-        file_list_dict[i] = input_name_list + [label_name_list]
+        file_list_dict[i] = list(zip(input_name_list, label_name_list))
 
     def extract_face_labels(self, backend, au_setting, emotion_source, emotion_setting, include_dominance, 
                             libreface_dir, openface_dir, subject_emotion, subject_vad, frame_count):
@@ -611,47 +611,39 @@ class MDMERLoader(BaseLoader):
 
     def save_multi_process(self, big_clips, small_clips, label_clips, filename):
         """
-        Saves big/small/label clips to .npy files using np.save (mmap-compatible).
-        Loads label names from label_list.txt and constructs dtype inline.
-
-        Args:
-            big_clips (np.ndarray): Shape (num_clips, chunk_len, H, W, C) or similar.
-            small_clips (np.ndarray): Same shape as big_clips, but smaller resolution.
-            label_clips (np.ndarray): Shape (num_clips, chunk_len, num_labels).
-            filename (str): Output file prefix.
-
-        Returns:
-            input_paths (list): [big_path, small_path]
-            label_path (str): Path to saved label .npy file
+        Saves each clip to individual .npy files in float32 format.
+        Labels are saved as structured arrays using dtype from label names.
         """
-        # Load label names and create structured dtype
+        # Load label info
         label_names = self.load_label_names(os.path.dirname(self.raw_data_path))
         label_dtype = self.get_label_dtype(label_names)
+        num_clips = len(label_clips)
 
-        # Validate label shape
-        if label_clips.ndim != 3 or label_clips.shape[2] != len(label_names):
-            raise ValueError(f"label_clips must be 3D with shape [clips, chunk_len, {len(label_names)}]. Got: {label_clips.shape}")
+        assert num_clips == len(big_clips) == len(small_clips), \
+            f"Mismatch: big={len(big_clips)}, small={len(small_clips)}, labels={len(label_clips)}"
 
-        # Output paths
-        cached_path = self.cached_path
-        os.makedirs(cached_path, exist_ok=True)
+        os.makedirs(self.cached_path, exist_ok=True)
 
-        big_path = os.path.join(cached_path, f"{filename}_big.npy")
-        small_path = os.path.join(cached_path, f"{filename}_small.npy")
-        label_path = os.path.join(cached_path, f"{filename}_label.npy")
+        input_paths = []
+        label_paths = []
 
-        # Save big and small clips as float32 (mmap-compatible)
-        np.save(big_path, big_clips.astype(np.float32))
-        np.save(small_path, small_clips.astype(np.float32))
+        for i in range(num_clips):
+            big_path = os.path.join(self.cached_path, f"{filename}_big{i}.npy")
+            small_path = os.path.join(self.cached_path, f"{filename}_small{i}.npy")
+            label_path = os.path.join(self.cached_path, f"{filename}_label{i}.npy")
 
-        # Reshape and convert labels to structured array
-        reshaped_labels = label_clips.reshape(-1, label_clips.shape[2])
-        structured_labels = np.core.records.fromarrays(reshaped_labels.T, dtype=label_dtype)
+            # Save clips as float32
+            np.save(big_path, big_clips[i].astype(np.float32))
+            np.save(small_path, small_clips[i].astype(np.float32))
 
-        # Save structured label array
-        np.save(label_path, structured_labels)
+            # Save labels as structured array
+            structured_label = np.core.records.fromarrays(label_clips[i].T, dtype=label_dtype)
+            np.save(label_path, structured_label)
 
-        return [big_path, small_path], label_path
+            input_paths.append((big_path, small_path))
+            label_paths.append(label_path)
+
+        return input_paths, label_paths
 
     def load_preprocessed_data_original(self):
         """Loads preprocessed data file paths and their corresponding labels from a CSV file.

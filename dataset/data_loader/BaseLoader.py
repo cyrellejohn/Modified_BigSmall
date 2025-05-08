@@ -557,31 +557,21 @@ class BaseLoader(Dataset):
 
     def build_file_list(self, file_list_dict):
         """
-        Builds and saves a structured CSV file listing paths to 'big', 'small', and 'label' files.
-
-        Args:
-            file_list_dict (dict): Mapping from process ID to a list of [big_path, small_path, label_path].
-
-        Raises:
-            ValueError: If any entry is malformed or if the final list is empty.
+        Builds and saves a structured CSV file with 'big', 'small', and 'label' file paths.
         """
-        # Validate and collect all valid entries
-        file_rows = [paths for pid, paths in file_list_dict.items()
-                     if isinstance(paths, list) and len(paths) == 3]
-
-        # Check for invalid entries
-        if len(file_rows) != len(file_list_dict):
-            invalid_pids = [pid for pid, paths in file_list_dict.items() 
-                            if not isinstance(paths, list) or len(paths) != 3]
-            raise ValueError(f"{self.dataset_name}: Invalid file entries for processes: {invalid_pids}")
+        file_rows = [
+            [big, small, label]
+            for clips in file_list_dict.values()
+            if isinstance(clips, list)
+            for (big, small), label in clips
+            if isinstance((big, small), tuple) and isinstance(label, str)
+        ]
 
         if not file_rows:
-            raise ValueError(f"{self.dataset_name}: No valid files found in file list.")
+            raise ValueError(f"{self.dataset_name}: No valid entries in file_list_dict.")
 
-        # Save to CSV
-        df = pd.DataFrame(file_rows, columns=['big', 'small', 'label'])
-        os.makedirs(os.path.dirname(self.file_list_path) or '.', exist_ok=True)
-        df.to_csv(self.file_list_path, index=False)
+        os.makedirs(os.path.dirname(self.file_list_path) or ".", exist_ok=True)
+        pd.DataFrame(file_rows, columns=["big", "small", "label"]).to_csv(self.file_list_path, index=False)
 
     def load_preprocessed_data(self):
         """Loads preprocessed data file paths and their corresponding labels from a CSV file.
