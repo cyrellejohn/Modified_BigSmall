@@ -614,9 +614,6 @@ class MDMERLoader(BaseLoader):
         Saves each clip to individual .npy files in float32 format.
         Labels are saved as structured arrays using dtype from label names.
         """
-        # Load label info
-        label_names = self.load_label_names(os.path.dirname(self.raw_data_path))
-        label_dtype = self.get_label_dtype(label_names)
         num_clips = len(label_clips)
 
         assert num_clips == len(big_clips) == len(small_clips), \
@@ -635,10 +632,7 @@ class MDMERLoader(BaseLoader):
             # Save clips as float32
             np.save(big_path, big_clips[i].astype(np.float32))
             np.save(small_path, small_clips[i].astype(np.float32))
-
-            # Save labels as structured array
-            structured_label = np.core.records.fromarrays(label_clips[i].T, dtype=label_dtype)
-            np.save(label_path, structured_label)
+            np.save(label_path, label_clips[i].astype(np.float32))
 
             input_paths.append((big_path, small_path))
             label_paths.append(label_path)
