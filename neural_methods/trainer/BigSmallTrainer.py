@@ -8,7 +8,7 @@ import re
 from neural_methods.model.BigSmall import BigSmall
 from neural_methods.trainer.BaseTrainer import BaseTrainer
 
-from evaluation.bigsmall_multitask_metrics import (calculate_ppg_metrics, calculate_openface_au_metrics)
+# from evaluation.bigsmall_multitask_metrics import (calculate_ppg_metrics, calculate_openface_au_metrics)
 
 '''
 from neural_methods import loss

@@ -1,287 +1,138 @@
-"""
-The post processing files for caluclating heart rate using FFT or peak detection.
-The file also  includes helper funcs such as detrend, power2db etc.
-"""
-
 import numpy as np
-import scipy
-import scipy.io
-from scipy.signal import butter
-from scipy.sparse import spdiags
-from copy import deepcopy
+from scipy.signal import butter, filtfilt, find_peaks, periodogram
 
-def _next_power_of_2(x):
-    """
-    Calculate the smallest power of 2 that is greater than or equal to the given integer x.
-
-    Args:
-        x (int): The input integer for which the nearest power of 2 is to be calculated.
-
-    Returns:
-        int: The smallest power of 2 that is greater than or equal to x.
-
-    Example:
-        _next_power_of_2(5)  # Returns 8
-        _next_power_of_2(8)  # Returns 8
-
-    Note:
-        If x is 0, the function returns 1, as 2^0 is the smallest power of 2.
-    """
+def next_power_of_2(x):
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
-def _detrend(input_signal, lambda_value):
+def detrend(signal, lambda_value):
     """
-    Detrend PPG signal by removing low-frequency trends using a regularized least squares approach.
+    Detrend a signal using Tarvainen's smoothness prior method.
 
     Args:
-        input_signal (np.array): The input PPG signal to be detrended.
-        lambda_value (float): Regularization parameter controlling the smoothness of the detrending.
+        signal (np.ndarray): 1D input signal
+        lambda_value (float): smoothing parameter
 
     Returns:
-        np.array: The detrended PPG signal.
+        np.ndarray: detrended signal
     """
-    # Determine the length of the input signal
-    signal_length = input_signal.shape[0]
-    
-    # Create an identity matrix of size equal to the signal length
-    H = np.identity(signal_length)
+    signal = signal.reshape(-1, 1)
+    N = len(signal)
+    I = np.eye(N)
+    D = np.diff(np.eye(N), n=2, axis=0)
+    A = I + lambda_value**2 * (D.T @ D)
 
-    # Construct arrays for the difference matrix
-    ones = np.ones(signal_length)
-    minus_twos = -2 * np.ones(signal_length)
+    detrended = np.linalg.solve(A, signal)
 
-    # Create a sparse matrix D to approximate the second derivative
-    diags_data = np.array([ones, minus_twos, ones])
-    diags_index = np.array([0, 1, 2])
-    D = spdiags(diags_data, diags_index, (signal_length - 2), signal_length).toarray()
+    return (signal - detrended).flatten()
 
-    # Perform the detrending operation using regularized least squares
-    detrended_signal = np.dot((H - np.linalg.inv(H + (lambda_value ** 2) * np.dot(D.T, D))), input_signal)
-    
-    # Return the detrended signal
-    return detrended_signal
+def magnitude_to_decibels(mag):
+    return 10 * np.log10(np.maximum(mag, 1e-12))  # Avoid log(0)
 
-def power2db(mag):
+def apply_FFT(signal, fps):
+    nfft = next_power_of_2(len(signal))
+    return periodogram(signal, fs=fps, nfft=nfft, detrend=False)
+
+def calculate_FFT_HR(signal, fps=60, low_cutoff=0.75, high_cutoff=2.5):
+    freqs, power = apply_FFT(signal, fps)
+    mask = (freqs >= low_cutoff) & (freqs <= high_cutoff)
+    peak_freq = freqs[mask][np.argmax(power[mask])]
+    return peak_freq * 60
+
+def calculate_peak_HR(signal, fps):
+    peaks, _ = find_peaks(signal)
+    if len(peaks) < 2:
+        return 0.0
+    return 60.0 / (np.mean(np.diff(peaks)) / fps)
+
+def compute_MACC(pred, ground_truth):
+    pred, ground_truth = map(np.squeeze, (pred, ground_truth))
+    min_len = min(len(pred), len(ground_truth))
+    pred, ground_truth = pred[:min_len], ground_truth[:min_len]
+
+    corrs = [abs(np.corrcoef(pred, np.roll(ground_truth, lag))[0, 1]) for lag in range(0, min_len)]
+    return max(corrs) if corrs else 0.0
+
+def calculate_SNR(signal, HR_ground_truth, fps=30, low_cutoff=0.75, high_cutoff=2.5):
+    freqs, power = apply_FFT(signal, fps)
+    power = np.squeeze(power)
+
+    hr_freq = HR_ground_truth / 60.0
+    harmonics = [(hr_freq, 6 / 60), (2 * hr_freq, 6 / 60)]
+
+    harmonic_power = 0
+    for freq, dev in harmonics:
+        mask = (freqs >= freq - dev) & (freqs <= freq + dev)
+        harmonic_power += np.sum(power[mask] ** 2)
+
+    noise_mask = (freqs >= low_cutoff) & (freqs <= high_cutoff)
+    for freq, dev in harmonics:
+        noise_mask &= ~((freqs >= freq - dev) & (freqs <= freq + dev))
+
+    noise_power = np.sum(power[noise_mask] ** 2)
+    return magnitude_to_decibels(harmonic_power / noise_power) if noise_power > 0 else 0.0
+
+def butter_filter(data, low_cutoff=None, high_cutoff=None, sampling_rate=30, order=4, filter_type='band'):
     """
-    Convert a power magnitude to decibels (dB).
-
-    This function takes a power magnitude and converts it to decibels using the formula:
-    dB = 10 * log10(mag)
+    Apply a Butterworth filter (bandpass, lowpass, or highpass) to the input signal.
 
     Args:
-        mag (float or np.array): The power magnitude to be converted. This can be a single float value or a numpy array of values.
+        data (array-like): Input signal.
+        low_cutoff (float, optional): Low cutoff frequency (Hz).
+        high_cutoff (float, optional): High cutoff frequency (Hz).
+        sampling_rate (int): Sampling rate of the signal (Hz).
+        order (int): Order of the filter.
+        filter_type (str): 'band', 'low', or 'high'.
 
     Returns:
-        float or np.array: The decibel equivalent of the input power magnitude. The return type matches the input type.
+        np.ndarray: Filtered signal.
     """
-    return 10 * np.log10(mag)
+    data = np.asarray(data)
+    nyquist = 0.5 * sampling_rate
 
-def _calculate_fft_hr(ppg_signal, fs=60, low_pass=0.75, high_pass=2.5):
-    """
-    Calculate heart rate based on PPG using Fast Fourier Transform (FFT).
-
-    Parameters:
-    - ppg_signal (np.array): The input PPG signal, a time-series data representing blood volume changes.
-    - fs (int, optional): Sampling frequency of the PPG signal. Default is 60 Hz.
-    - low_pass (float, optional): Lower bound of the frequency range in Hz for filtering the heart rate. Default is 0.75 Hz.
-    - high_pass (float, optional): Upper bound of the frequency range in Hz for filtering the heart rate. Default is 2.5 Hz.
-
-    Returns:
-    - fft_hr (float): Calculated heart rate in beats per minute.
-    """
-    # Expand dimensions of the PPG signal to ensure it is a 2D array
-    ppg_signal = np.expand_dims(ppg_signal, 0)
-
-    # Calculate the next power of 2 for the length of the signal for efficient FFT computation
-    N = _next_power_of_2(ppg_signal.shape[1])
-
-    # Compute the periodogram to estimate the power spectral density of the signal
-    f_ppg, pxx_ppg = scipy.signal.periodogram(ppg_signal, fs=fs, nfft=N, detrend=False)
-
-    # Create a mask to filter frequencies within the specified range (0.75 Hz to 2.5 Hz)
-    fmask_ppg = np.argwhere((f_ppg >= low_pass) & (f_ppg <= high_pass))
-
-    # Apply the mask to extract the relevant frequency and power spectral density values
-    mask_ppg = np.take(f_ppg, fmask_ppg)
-    mask_pxx = np.take(pxx_ppg, fmask_ppg)
-
-    # Find the frequency with the maximum power within the specified range
-    # Then convert the frequency from Hz to beats per minute by multiplying by 60
-    fft_hr = np.take(mask_ppg, np.argmax(mask_pxx, 0))[0] * 60
-
-    # Return the calculated heart rate in beats per minute
-    return fft_hr
-
-def _calculate_peak_hr(ppg_signal, fs):
-    """
-    Calculate heart rate from a PPG signal using peak detection.
-
-    Args:
-        ppg_signal (np.array): The input PPG signal, a 1D array representing the recorded signal over time.
-        fs (int or float): The sampling frequency of the PPG signal, indicating the number of samples per second.
-
-    Returns:
-        float: The estimated heart rate in beats per minute (BPM).
-    """
-    # Detect peaks in the PPG signal, which correspond to heartbeats
-    ppg_peaks, _ = scipy.signal.find_peaks(ppg_signal)
-
-    # Calculate the average number of samples between consecutive peaks
-    # Convert this to time in seconds by dividing by the sampling frequency
-    # Convert the heart rate from beats per second to beats per minute by multiplying by 60
-    hr_peak = 60 / (np.mean(np.diff(ppg_peaks)) / fs)
-
-    return hr_peak
-
-def _compute_macc(pred_signal, gt_signal):
-    """
-    Calculate maximum amplitude of cross correlation (MACC) by computing correlation at all time lags.
-    
-    Args:
-        pred_ppg_signal(np.array): predicted PPG signal 
-        label_ppg_signal(np.array): ground truth, label PPG signal
-        
-    Returns:
-        MACC(float): Maximum Amplitude of Cross-Correlation
-    """
-    # Create deep copies of the input signals to avoid modifying the originals
-    pred = deepcopy(pred_signal)
-    gt = deepcopy(gt_signal)
-
-    # Remove single-dimensional entries from the shape of the signals
-    pred = np.squeeze(pred)
-    gt = np.squeeze(gt)
-
-    # Truncate both signals to the minimum length to ensure equal size
-    min_len = np.min((len(pred), len(gt)))
-    pred = pred[:min_len]
-    gt = gt[:min_len]
-    
-    # Create an array of lag values from 0 to the length of the signal minus one
-    lags = np.arange(0, len(pred)-1, 1)
-
-    # Initialize a list to store cross-correlation values
-    tlcc_list = []
-
-    # Iterate over each lag value
-    for lag in lags:
-        # Compute the absolute cross-correlation between the predicted signal
-        # and a lagged version of the ground truth signal
-        cross_corr = np.abs(np.corrcoef(pred, np.roll(gt, lag))[0][1])
-
-        # Append the cross-correlation value to the list
-        tlcc_list.append(cross_corr)
-
-    # Find the maximum value in the list of cross-correlation values
-    macc = max(tlcc_list)
-
-    # Return the maximum amplitude of cross-correlation
-    return macc
-
-def _calculate_SNR(pred_ppg_signal, hr_label, fs=30, low_pass=0.75, high_pass=2.5):
-    """
-    Calculate the Signal-to-Noise Ratio (SNR) of a predicted PPG signal.
-
-    The SNR is computed as the ratio of the power around the first and second harmonics
-    of the ground truth heart rate frequency to the power of the remainder of the frequency
-    spectrum within a specified range.
-
-    Args:
-        pred_ppg_signal (np.array): The predicted PPG signal.
-        hr_label (float): The ground truth heart rate in beats per minute.
-        fs (int or float, optional): The sampling rate of the signal. Defaults to 30 Hz.
-        low_pass (float, optional): The lower bound of the frequency range to consider. Defaults to 0.75 Hz.
-        high_pass (float, optional): The upper bound of the frequency range to consider. Defaults to 2.5 Hz.
-
-    Returns:
-        float: The calculated SNR in decibels (dB).
-    """
-    # Convert heart rate to first and second harmonic frequencies in Hz
-    first_harmonic_freq = hr_label / 60
-    second_harmonic_freq = 2 * first_harmonic_freq
-    deviation = 6 / 60  # 6 beats/min converted to Hz
-
-    # Calculate the FFT of the predicted PPG signal
-    pred_ppg_signal = np.expand_dims(pred_ppg_signal, 0)
-    N = _next_power_of_2(pred_ppg_signal.shape[1])
-    f_ppg, pxx_ppg = scipy.signal.periodogram(pred_ppg_signal, fs=fs, nfft=N, detrend=False)
-
-    # Identify indices for the first and second harmonics and the remainder of the spectrum
-    idx_harmonic1 = np.argwhere((f_ppg >= (first_harmonic_freq - deviation)) & (f_ppg <= (first_harmonic_freq + deviation)))
-    idx_harmonic2 = np.argwhere((f_ppg >= (second_harmonic_freq - deviation)) & (f_ppg <= (second_harmonic_freq + deviation)))
-    idx_remainder = np.argwhere((f_ppg >= low_pass) & (f_ppg <= high_pass) \
-     & ~((f_ppg >= (first_harmonic_freq - deviation)) & (f_ppg <= (first_harmonic_freq + deviation))) \
-     & ~((f_ppg >= (second_harmonic_freq - deviation)) & (f_ppg <= (second_harmonic_freq + deviation))))
-
-    # Extract power values for harmonics and remainder
-    pxx_ppg = np.squeeze(pxx_ppg)
-    pxx_harmonic1 = pxx_ppg[idx_harmonic1]
-    pxx_harmonic2 = pxx_ppg[idx_harmonic2]
-    pxx_remainder = pxx_ppg[idx_remainder]
-
-    # Calculate signal power for harmonics and remainder
-    signal_power_hm1 = np.sum(pxx_harmonic1**2)
-    signal_power_hm2 = np.sum(pxx_harmonic2**2)
-    signal_power_rem = np.sum(pxx_remainder**2)
-
-    # Calculate SNR as the ratio of harmonic power to remainder power
-    if not signal_power_rem == 0: # Avoid division by zero
-        SNR = power2db((signal_power_hm1 + signal_power_hm2) / signal_power_rem)
+    if filter_type == 'band':
+        if low_cutoff is None or high_cutoff is None:
+            raise ValueError("Both low_cutoff and high_cutoff must be provided for a bandpass filter.")
+        cutoff = [low_cutoff / nyquist, high_cutoff / nyquist]
+    elif filter_type == 'low':
+        if high_cutoff is None:
+            raise ValueError("high_cutoff must be provided for a lowpass filter.")
+        cutoff = high_cutoff / nyquist
+    elif filter_type == 'high':
+        if low_cutoff is None:
+            raise ValueError("low_cutoff must be provided for a highpass filter.")
+        cutoff = low_cutoff / nyquist
     else:
-        SNR = 0
+        raise ValueError("Invalid filter_type. Use 'band', 'low', or 'high'.")
 
-    return SNR
+    b, a = butter(order, cutoff, btype=filter_type)
+    return filtfilt(b, a, data)
 
-def calculate_metric_per_video(predictions, labels, fs=30, diff_flag=True, use_bandpass=True, hr_method='FFT'):
-    """
-    Calculate video-level Heart Rate (HR) and Signal-to-Noise Ratio (SNR) from PPG signals.
-
-    Args:
-        predictions (np.array): The predicted PPG signal.
-        labels (np.array): The ground truth PPG signal.
-        fs (int, optional): Sampling frequency of the signals. Default is 30 Hz.
-        diff_flag (bool, optional): If True, assumes the input signals are the first derivative of the PPG signal.
-        use_bandpass (bool, optional): If True, applies a bandpass filter to the signals.
-        hr_method (str, optional): Method to calculate heart rate, either 'FFT' or 'Peak'. Default is 'FFT'.
-
-    Returns:
-        tuple: A tuple containing:
-            - hr_label (float): Ground truth heart rate.
-            - hr_pred (float): Predicted heart rate.
-            - SNR (float): Signal-to-Noise Ratio of the predicted signal.
-            - macc (float): Maximum Amplitude of Cross-Correlation between predicted and ground truth signals.
-    """
-
-    # Detrend the signals. If diff_flag is True, integrate the signals before detrending.
-    if diff_flag:
-        predictions = _detrend(np.cumsum(predictions), 100)
-        labels = _detrend(np.cumsum(labels), 100)
-    else:
-        predictions = _detrend(predictions, 100)
-        labels = _detrend(labels, 100)
-
-    # Apply a bandpass filter to the signals if use_bandpass is True.
-    if use_bandpass:
-        # Bandpass filter between [0.75, 2.5] Hz, equivalent to [45, 150] beats per minute.
-        [b, a] = butter(1, [0.75 / fs * 2, 2.5 / fs * 2], btype='bandpass')
-        predictions = scipy.signal.filtfilt(b, a, np.double(predictions))
-        labels = scipy.signal.filtfilt(b, a, np.double(labels))
+def calculate_metric_per_video(pred, ground_truth, diff_normalized=True, apply_bandpass=True, fps=30, hr_method='FFT'):
+    order = 3
+    low_cutoff = 0.5
+    high_cutoff = 4.0
     
-    # Calculate the Maximum Amplitude of Cross-Correlation (MACC).
-    macc = _compute_macc(predictions, labels)
+    if diff_normalized:
+        pred = np.cumsum(pred)
+        ground_truth = np.cumsum(ground_truth)
 
-    # Calculate heart rate using the specified method (FFT or Peak).
+    pred = detrend(pred, 100)
+    ground_truth = detrend(ground_truth, 100)
+
+    if apply_bandpass:
+        pred = butter_filter(pred, low_cutoff, high_cutoff, fps, order)
+        ground_truth = butter_filter(ground_truth, low_cutoff, high_cutoff, fps, order)
+
+    MACC = compute_MACC(pred, ground_truth)
+
     if hr_method == 'FFT':
-        hr_pred = _calculate_fft_hr(predictions, fs=fs)
-        hr_label = _calculate_fft_hr(labels, fs=fs)
-    elif hr_method == 'Peak':
-        hr_pred = _calculate_peak_hr(predictions, fs=fs)
-        hr_label = _calculate_peak_hr(labels, fs=fs)
+        HR_function = lambda data, fps: calculate_FFT_HR(data, fps, low_cutoff, high_cutoff)
     else:
-        raise ValueError('Please use FFT or Peak to calculate your HR.')
+        HR_function = calculate_peak_HR
 
-    # Calculate the Signal-to-Noise Ratio (SNR) of the predicted signal.
-    SNR = _calculate_SNR(predictions, hr_label, fs=fs)
+    HR_pred = HR_function(pred, fps)
+    HR_ground_truth = HR_function(ground_truth, fps)
 
-    # Return the calculated metrics.
-    return hr_label, hr_pred, SNR, macc
+    SNR = calculate_SNR(pred, HR_ground_truth, fps, low_cutoff, high_cutoff)
+
+    return HR_ground_truth, HR_pred, SNR, MACC

@@ -91,6 +91,10 @@ class BigSmall(nn.Module):
         self.ppg_fc1 = nn.Linear(5184, self.nb_dense, bias=True)
         self.ppg_fc2 = nn.Linear(self.nb_dense, self.out_size_ppg, bias=True)
 
+        # Emotion Fully Connected Layers
+        self.emotion_fc1 = nn.Linear(5184, self.nb_dense, bias=True)
+        self.emotion_fc2 = nn.Linear(self.nb_dense, self.out_size_emotion, bias=True)
+
     def forward(self, inputs, params=None):
         """
         Forward pass of the BigSmall model.
@@ -171,8 +175,12 @@ class BigSmall(nn.Module):
         ppgfc1 = nn.functional.relu(self.ppg_fc1(share1))
         ppg_output = self.ppg_fc2(ppgfc1)
 
-        # Return the outputs for AU and PPG tasks.
-        return au_output, ppg_output
+        # Emotion Output Layers: Process through fully connected layers for emotion task.   
+        emotionfc1 = nn.functional.relu(self.emotion_fc1(share1))
+        emotion_output = self.emotion_fc2(emotionfc1)
+
+        # Return the outputs for AU, PPG, and emotion tasks.
+        return au_output, ppg_output, emotion_output
 
 
 #####################################################

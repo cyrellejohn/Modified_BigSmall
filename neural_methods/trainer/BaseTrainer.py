@@ -72,73 +72,62 @@ class BaseTrainer:
 
     def plot_losses_and_lrs(self, train_loss, valid_loss, lrs, config):
         """
-        Generates and saves plots for training and validation losses, as well as learning rates.
-
-        Parameters:
-        - train_loss: List of training loss values for each epoch.
-        - valid_loss: List of validation loss values for each epoch.
-        - lrs: List of learning rate values for each scheduler step.
-        - config: Configuration object containing paths and settings.
-
-        The method creates two plots:
-        1. A plot of training and validation losses over epochs.
-        2. A plot of learning rates over scheduler steps.
-
-        The plots are saved as PDF files in a directory specified by the config.
+        Efficiently generates and saves loss and learning rate plots.
         """
 
-        # Construct the output directory path for saving plots
+        if config.TOOLBOX_MODE != 'train_and_test':
+            raise ValueError("Metrics.py evaluation only supports 'train_and_test' and 'only_test'!")
+
+        filename_id = self.model_file_name
         output_dir = os.path.join(config.LOG.PATH, config.TRAIN.DATA.EXP_DATA_NAME, 'plots')
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
 
-        # Determine the filename ID based on the toolbox mode
-        if config.TOOLBOX_MODE == 'train_and_test':
-            filename_id = self.model_file_name
+        def _save_plot(fig_size, x, y_list, labels, title, xlabel, ylabel, path, y_format=None):
+            plt.figure(figsize=fig_size)
+            for y, label in zip(y_list, labels):
+                plt.plot(x, y, label=label)
+            plt.xlabel(xlabel)
+            plt.ylabel(ylabel)
+            plt.title(title)
+            plt.legend()
+
+            ax = plt.gca()
+            if y_format == "int":
+                ax.yaxis.set_major_locator(MaxNLocator(integer=False, prune="both"))
+            elif y_format == "sci":
+                ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
+                ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+            plt.tight_layout()
+            plt.savefig(path, dpi=300)
+            plt.close()
+
+        epochs = list(range(len(train_loss)))
+        loss_labels = ['Training Loss']
+        loss_values = [train_loss]
+        if valid_loss:
+            loss_labels.append('Validation Loss')
+            loss_values.append(valid_loss)
         else:
-            raise ValueError('Metrics.py evaluation only supports train_and_test and only_test!')
-        
-        # Create a plot for training and validation losses
-        plt.figure(figsize=(10, 6))
-        epochs = range(0, len(train_loss))  # Integer values for x-axis
-        plt.plot(epochs, train_loss, label='Training Loss')
-        if len(valid_loss) > 0:
-            plt.plot(epochs, valid_loss, label='Validation Loss')
-        else:
-            print("The list of validation losses is empty. The validation loss will not be plotted!")
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title(f'{filename_id} Losses')
-        plt.legend()
-        plt.xticks(epochs)
+            print("Validation loss is empty; only training loss will be plotted.")
 
-        # Set y-axis ticks with more granularity
-        ax = plt.gca()
-        ax.yaxis.set_major_locator(MaxNLocator(integer=False, prune='both'))
+        _save_plot(fig_size=(10, 6),
+                   x=epochs,
+                   y_list=loss_values,
+                   labels=loss_labels,
+                   title=f'{filename_id} Losses',
+                   xlabel='Epoch',
+                   ylabel='Loss',
+                   path=os.path.join(output_dir, f'{filename_id}_losses.pdf'),
+                   y_format='int')
 
-        # Save the loss plot as a PDF file
-        loss_plot_filename = os.path.join(output_dir, filename_id + '_losses.pdf')
-        plt.savefig(loss_plot_filename, dpi=300)
-        plt.close()
+        _save_plot(fig_size=(6, 4),
+                   x=list(range(len(lrs))),
+                   y_list=[lrs],
+                   labels=['Learning Rate'],
+                   title=f'{filename_id} LR Schedule',
+                   xlabel='Scheduler Step',
+                   ylabel='Learning Rate',
+                   path=os.path.join(output_dir, f'{filename_id}_learning_rates.pdf'),
+                   y_format='sci')
 
-        # Create a separate plot for learning rates
-        plt.figure(figsize=(6, 4))
-        scheduler_steps = range(0, len(lrs))
-        plt.plot(scheduler_steps, lrs, label='Learning Rate')
-        plt.xlabel('Scheduler Step')
-        plt.ylabel('Learning Rate')
-        plt.title(f'{filename_id} LR Schedule')
-        plt.legend()
-
-        # Set y-axis values in scientific notation
-        ax = plt.gca()
-        ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True, useOffset=False))
-        ax.ticklabel_format(axis='y', style='sci', scilimits=(0,0))  # Force scientific notation
-
-        # Save the learning rate plot as a PDF file
-        lr_plot_filename = os.path.join(output_dir, filename_id + '_learning_rates.pdf')
-        plt.savefig(lr_plot_filename, bbox_inches='tight', dpi=300)
-        plt.close()
-
-        # Print a message indicating where the plots have been saved
-        print('Saving plots of losses and learning rates to:', output_dir)
+        print(f"Saved loss and learning rate plots to: {output_dir}")
