@@ -196,7 +196,7 @@ class BigSmallTrainer(BaseTrainer):
             running_loss = 0.0
 
             tbar = tqdm(train_loader, ncols=80, desc=f"\nTrain Epoch: {epoch}")
-            for idx, (data, labels) in enumerate(tbar):
+            for idx, (data, labels, _, _) in enumerate(tbar):
                 data, labels = self.send_data_to_device(*self.format_data_shape(data, labels))
                 
                 self.optimizer.zero_grad()
@@ -293,11 +293,11 @@ class BigSmallTrainer(BaseTrainer):
                 losses["ppg"].append(ppg_loss.item())
                 losses["emotion"].append(emotion_loss.item())
 
-                # preds_batch, labels_batch = self.process_predictions(outputs, labels, subject_ids, chunk_ids, batch_size)
-                # self.update_predictions(preds_dict, labels_dict, preds_batch, labels_batch)
+                preds_batch, labels_batch = self.process_predictions(outputs, labels, subject_ids, chunk_ids, batch_size)
+                self.update_predictions(preds_dict, labels_dict, preds_batch, labels_batch)
 
         mean_losses = {k: np.mean(v) for k, v in losses.items()}
-        # results = self.evaluate_predictions(preds_dict, labels_dict)
+        self.evaluate_predictions(preds_dict, labels_dict)
 
         if epoch is not None:
             print(f"Validation Loss @ Epoch {epoch}: {mean_losses['total']:.4f}")

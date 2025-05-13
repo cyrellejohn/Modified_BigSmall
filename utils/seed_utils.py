@@ -3,6 +3,15 @@ import random
 import numpy as np
 import torch
 
+# Moved seed_worker to top-level
+def seed_worker(worker_id):
+    """
+    Initialize each worker with a unique, deterministic seed.
+    """
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 def seed_everything_custom(seed=100, workers=True):
     """
     Custom function to set random seeds for reproducibility across:
@@ -20,7 +29,7 @@ def seed_everything_custom(seed=100, workers=True):
         dict or None: If workers=True, returns:
             {'train_generator': torch.Generator,
              'general_generator': torch.Generator,
-             'seed_worker': callable}
+             'seed_worker': callable} # Now returns the top-level function
             Otherwise, returns None.
     """
 
@@ -39,14 +48,7 @@ def seed_everything_custom(seed=100, workers=True):
         train_generator = torch.Generator().manual_seed(seed)
         general_generator = torch.Generator().manual_seed(seed)
 
-        def seed_worker(worker_id):
-            """
-            Initialize each worker with a unique, deterministic seed.
-            """
-            worker_seed = torch.initial_seed() % 2 ** 32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
-
+        # Return the top-level seed_worker function
         return {'train_generator': train_generator,
                 'general_generator': general_generator,
                 'seed_worker': seed_worker}

@@ -1,5 +1,5 @@
 BASE: [''] # ALL ARE NOT FINAL
-TOOLBOX_MODE: "only_test"  # "train_and_test", "only_test", "only_preprocess"
+TOOLBOX_MODE: "train_and_test"  # "train_and_test", "only_test", "only_preprocess"
 
 TRAIN:
   BATCH_SIZE: 32 # Original BigSmall: 180
