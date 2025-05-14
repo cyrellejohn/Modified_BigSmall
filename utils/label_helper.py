@@ -11,20 +11,30 @@ class LabelHelper:
         self.au_indices = []
         self.emotion_index = None
 
-    def get_computed_weights(self):
+    def compute_weights_and_save(self, save_dir=None):
         """
-        Main entry point: loads label names, sets indices, and computes weights.
-        Returns:
-            au_indices (list[int])
-            emotion_index (int or None)
-            au_weights (torch.Tensor)
-            emotion_weights (torch.Tensor or None)
+        Computes and saves AU and emotion weights instead of returning them.
+
+        Args:
+            save_dir (str): Directory to save the weights. If None, uses config.MODEL.MODEL_DIR.
         """
+        if save_dir is None:
+            save_dir = self.config.MODEL.MODEL_DIR
+        os.makedirs(save_dir, exist_ok=True)
+
         label_list_path = os.path.dirname(self.config.TRAIN.DATA.DATA_PATH)
         label_names = self._load_label_names(label_list_path)
         self._set_label_indices(label_names)
+
         au_weights, emotion_weights = self._compute_weights()
-        return au_weights, emotion_weights
+
+        if au_weights is not None:
+            torch.save(au_weights, os.path.join(save_dir, "au_weights.pt"))
+            print(f"[INFO] AU weights saved to {os.path.join(save_dir, 'au_weights.pt')}")
+
+        if emotion_weights is not None:
+            torch.save(emotion_weights, os.path.join(save_dir, "emotion_weights.pt"))
+            print(f"[INFO] Emotion weights saved to {os.path.join(save_dir, 'emotion_weights.pt')}")
 
     def _load_label_names(self, label_list_path):
         with open(os.path.join(label_list_path, "label_list.txt"), "r") as f:

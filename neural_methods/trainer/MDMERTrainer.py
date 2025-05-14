@@ -1,73 +1,76 @@
 """Trainer for BigSmall Multitask Models"""
 
-# Training / Eval Imports 
-import torch
-import torch.optim as optim
-import re
-
-from neural_methods.model.BigSmall import BigSmall
-from neural_methods.trainer.BaseTrainer import BaseTrainer
-
-from evaluation.bigsmall_metrics import (calculate_ppg_metrics, calculate_au_metrics, calculate_emotion_metrics)
-from collections import Counter
-
-
-'''
-from neural_methods import loss
-'''
-
-# Other Imports
-from collections import OrderedDict
 import numpy as np
-import pandas as pd
 import os
 from tqdm import tqdm
-
-import os
 import torch
 import torch.optim as optim
 from neural_methods.model.BigSmall import BigSmall
 from neural_methods.trainer.BaseTrainer import BaseTrainer
+from evaluation.bigsmall_metrics import (calculate_ppg_metrics, calculate_au_metrics, calculate_emotion_metrics)
+from collections import Counter
+from torch.cuda.amp import GradScaler, autocast
+
 
 class BigSmallTrainer(BaseTrainer):
-    def __init__(self, config, data_loader, weights=None):
+    def __init__(self, config, data_loader, use_amp=False):
         print('\nInitializing BigSmall Multitask Trainer\n')
 
-        # Basic config
         self.config = config
-        self.model_dir = config.MODEL.MODEL_DIR
-        self.model_file_name = config.TRAIN.MODEL_FILE_NAME
-        self.max_epoch_num = config.TRAIN.EPOCHS
-        self.LR = config.TRAIN.LR
-        self.chunk_len = config.TRAIN.DATA.PREPROCESS.CHUNK_LENGTH
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_amp = use_amp
+        self.scaler = GradScaler(enabled=use_amp)
 
+        # Config parameters
+        train_cfg = config.TRAIN
+        model_cfg = config.MODEL.BIGSMALL
+        data_cfg = train_cfg.DATA
+
+        self.model_dir = config.MODEL.MODEL_DIR
+        self.model_file_name = train_cfg.MODEL_FILE_NAME
+        self.max_epoch_num = train_cfg.EPOCHS
+        self.LR = train_cfg.LR
+        self.chunk_len = data_cfg.PREPROCESS.CHUNK_LENGTH
+
+        # GPU & TSM setup
         self.num_of_gpu = torch.cuda.device_count()
         self.using_TSM = self.num_of_gpu > 0
-        self.frame_depth = config.MODEL.BIGSMALL.FRAME_DEPTH if self.using_TSM else 1
+        self.frame_depth = model_cfg.FRAME_DEPTH if self.using_TSM else 1
         self.base_len = self.num_of_gpu * self.frame_depth
+
+        # Training state
         self.best_epoch = 0
         self.min_valid_loss = float("inf")
 
+        # Task toggles
         self.train_au = self.train_ppg = self.train_emotion = True
         self.enable_au_eval = self.enable_ppg_eval = self.enable_emotion_eval = True
-        self.train_ppg_colname = "pos_ppg" # Option: "ppg" or "filtered_ppg"
+
+        # Label config
+        self.train_ppg_colname = "pos_ppg"
         self.test_ppg_colname = "ppg"
         self.emotion_colname = "emotion_lf"
         self.set_label_weights = True
         self.emotion_class = 8
-        
-        # Label setup
-        label_path = os.path.dirname(config.TRAIN.DATA.DATA_PATH)
+
+        # Load and set label names
+        label_path = os.path.dirname(train_cfg.DATA.DATA_PATH)
         self.label_names = self.load_label_names(label_path)
         self.set_label_indices(self.label_names)
 
-        # Model and loss setup
+        # Initialize model
         self.model = self.define_model().to(self.device)
 
+        # Training setup
         if "train" in data_loader:
             self.num_train_batches = len(data_loader["train"])
-            self.configure_loss(weights[0], weights[1])
+            
+            if self.set_label_weights:
+                au_weights, emotion_weights = self.load_loss_weights()
+                self.configure_loss(au_weights, emotion_weights)
+            else:
+                self.configure_loss()
+            
             self.configure_optimizers()
 
     def configure_optimizers(self):
@@ -98,6 +101,25 @@ class BigSmallTrainer(BaseTrainer):
             self.criterionPPG = torch.nn.MSELoss().to(self.device)
         if self.train_emotion:
             self.criterionEmotion = torch.nn.CrossEntropyLoss(weight=emotion_weights).to(self.device)
+
+    def load_loss_weights(self, weights_dir=None):
+        """
+        Load precomputed AU and emotion weights from disk.
+        """
+        weights_dir = weights_dir
+
+        au_weights_path = os.path.join(weights_dir, "au_weights.pt")
+        emotion_weights_path = os.path.join(weights_dir, "emotion_weights.pt")
+
+        au_weights = torch.load(au_weights_path).to(self.device) if os.path.exists(au_weights_path) else None
+        emotion_weights = torch.load(emotion_weights_path).to(self.device) if os.path.exists(emotion_weights_path) else None
+
+        if au_weights is not None:
+            print(f"[INFO] Loaded AU weights from {au_weights_path}")
+        if emotion_weights is not None:
+            print(f"[INFO] Loaded emotion weights from {emotion_weights_path}")
+
+        return au_weights, emotion_weights
 
     @staticmethod
     def load_label_names(label_list_path):
@@ -199,13 +221,7 @@ class BigSmallTrainer(BaseTrainer):
             for idx, (data, labels, _, _) in enumerate(tbar):
                 data, labels = self.send_data_to_device(*self.format_data_shape(data, labels))
                 
-                self.optimizer.zero_grad()
-
-                outputs = self.model(data)
-                total_loss, au_loss, ppg_loss, emotion_loss = self.compute_loss(outputs, labels)
-                
-                total_loss.backward()
-                self.optimizer.step()
+                total_loss, au_loss, ppg_loss, emotion_loss = self.backward_step(data, labels)
                 self.scheduler.step()
 
                 lrs.append(self.scheduler.get_last_lr()[0])
@@ -231,6 +247,30 @@ class BigSmallTrainer(BaseTrainer):
 
         if self.config.TRAIN.PLOT_LOSSES_AND_LR:
             self.plot_losses_and_lrs(mean_train_losses, mean_valid_losses, lrs, self.config)
+
+    def backward_step(self, data, labels):
+        """
+        Performs the forward, backward, and optimizer step with AMP support.
+        
+        Returns:
+            tuple: (total_loss, au_loss, ppg_loss, emotion_loss)
+        """
+        self.optimizer.zero_grad()
+
+        if self.use_amp:
+            with autocast():
+                outputs = self.model(data)
+                total_loss, au_loss, ppg_loss, emotion_loss = self.compute_loss(outputs, labels)
+            self.scaler.scale(total_loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            outputs = self.model(data)
+            total_loss, au_loss, ppg_loss, emotion_loss = self.compute_loss(outputs, labels)
+            total_loss.backward()
+            self.optimizer.step()
+
+        return total_loss, au_loss, ppg_loss, emotion_loss
 
     def save_model(self, index=None, best_model=False):
         """

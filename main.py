@@ -45,6 +45,9 @@ def build_dataloader(mode, data_config, batch_size, num_workers, shuffle, seed_w
 
 def run_model(config, dataloaders, train=True, test=True):
     """Instantiates and runs training and/or testing."""
+    use_amp = True
+    calculate_weights = True
+
     trainer_map = {
         "BigSmall": trainer.BigSmallTrainer.BigSmallTrainer,
         "MDMER_BigSmall": trainer.MDMERTrainer.BigSmallTrainer,
@@ -60,14 +63,53 @@ def run_model(config, dataloaders, train=True, test=True):
     if train:
         # Initialize label helper
         label_helper = LabelHelper(config, num_emotion_classes=8)
-        weights = label_helper.get_computed_weights()
-        model_trainer = trainer_class(config, dataloaders, weights)
+        if calculate_weights:
+            label_helper.get_computed_weights()
+        else:
+            weights = None
+        model_trainer = trainer_class(config, dataloaders, weights, use_amp=use_amp)
 
         model_trainer.train(dataloaders)
     if test:
         model_trainer = trainer_class(config, dataloaders)
         
         model_trainer.test(dataloaders)
+
+def run_model(config, dataloaders, train=True, test=True):
+    """Instantiates and runs training and/or testing."""
+
+    if not train and not test:
+        print("[Warning] Neither training nor testing is enabled. Exiting run_model.")
+        return
+
+    use_amp = True
+    calculate_weights = True
+
+    trainer_map = {
+        "BigSmall": trainer.BigSmallTrainer.BigSmallTrainer,
+        "MDMER_BigSmall": trainer.MDMERTrainer.BigSmallTrainer,
+        "DeepPhys": trainer.DeepPhysTrainer.DeepPhysTrainer
+    }
+
+    if config.MODEL.NAME not in trainer_map:
+        raise ValueError(f"Unsupported model: {config.MODEL.NAME}")
+
+    trainer_class = trainer_map[config.MODEL.NAME]
+
+    # Prepare weights only once if needed
+    if train and calculate_weights:
+        label_helper = LabelHelper(config, num_emotion_classes=8)
+        label_helper.compute_weights_and_save()
+
+    # Instantiate trainer only once
+    model_trainer = trainer_class(config, dataloaders, use_amp=use_amp) if train else trainer_class(config, dataloaders)
+
+    # Execute train/test
+    if train:
+        model_trainer.train(dataloaders)
+    if test:
+        model_trainer.test(dataloaders)
+
 
 
 def main():
