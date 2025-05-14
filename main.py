@@ -42,39 +42,6 @@ def build_dataloader(mode, data_config, batch_size, num_workers, shuffle, seed_w
                       persistent_workers=True,
                       pin_memory=True)
 
-
-def run_model(config, dataloaders, train=True, test=True):
-    """Instantiates and runs training and/or testing."""
-    use_amp = True
-    calculate_weights = True
-
-    trainer_map = {
-        "BigSmall": trainer.BigSmallTrainer.BigSmallTrainer,
-        "MDMER_BigSmall": trainer.MDMERTrainer.BigSmallTrainer,
-        "DeepPhys": trainer.DeepPhysTrainer.DeepPhysTrainer
-    }
-
-    if config.MODEL.NAME not in trainer_map:
-        raise ValueError(f"Unsupported model: {config.MODEL.NAME}")
-
-    # Initialize trainer
-    trainer_class = trainer_map[config.MODEL.NAME]
-    
-    if train:
-        # Initialize label helper
-        label_helper = LabelHelper(config, num_emotion_classes=8)
-        if calculate_weights:
-            label_helper.get_computed_weights()
-        else:
-            weights = None
-        model_trainer = trainer_class(config, dataloaders, weights, use_amp=use_amp)
-
-        model_trainer.train(dataloaders)
-    if test:
-        model_trainer = trainer_class(config, dataloaders)
-        
-        model_trainer.test(dataloaders)
-
 def run_model(config, dataloaders, train=True, test=True):
     """Instantiates and runs training and/or testing."""
 
@@ -109,8 +76,6 @@ def run_model(config, dataloaders, train=True, test=True):
         model_trainer.train(dataloaders)
     if test:
         model_trainer.test(dataloaders)
-
-
 
 def main():
     # Argument parsing
