@@ -29,7 +29,7 @@ from tqdm import tqdm
 class MDMERLoader(BaseLoader):
     """The data loader for the MDMER dataset."""
 
-    def __init__(self, name, data_path, config_data):
+    def __init__(self, name, data_path, config_data, subject_dirs=None):
         """
         Initializes an instance of the UBFCrPPGLoader class.
 
@@ -51,9 +51,10 @@ class MDMERLoader(BaseLoader):
                                   |       |-- ground_truth.txt
                              -----------------
             config_data (CfgNode): Configuration settings for the data loader, referenced from config.py.
+            subject_dirs (Optional[List[Dict[str, str]]]): List of subject directories, if provided.
         """
         # Call the initializer of the superclass BaseLoader with the provided arguments
-        super().__init__(name, data_path, config_data)
+        super().__init__(name, data_path, config_data, subject_dirs)
     
     def get_raw_data(self, data_path):
         """Returns data directories under the path of MDMER dataset"""
@@ -109,10 +110,11 @@ class MDMERLoader(BaseLoader):
 
         # Static Configuration
         phys_label_type = 'raw'                     # Options: 'raw', 'filtered', 'both'
-        support_backend = 'libreface'                # Options: 'libreface', 'openface', 'both'
-        openface_au_setting = 'dynamic'             # Options: 'dynamic', 'dynamic_wild', 'static', 'static_wild'
-        emotion_source = 'libreface'                 # Options: 'original', 'libreface'
-        original_emotion_setting = 'both'           # Options: 'discrete', 'vad', 'both'
+        support_backend = 'both'                # Options: 'libreface', 'openface', 'both'
+        openface_au_setting = 'all'             # Options: 'dynamic', 'dynamic_wild', 'static', 'static_wild', 'all'
+        include_au_intensity = False
+        emotion_source = 'original'                 # Options: 'original', 'libreface'
+        original_emotion_setting = 'modified'           # Options: 'discrete', 'vad', 'dvad', 'modified'
         include_dominance = False
 
         # Subject info
@@ -130,6 +132,7 @@ class MDMERLoader(BaseLoader):
 
         subject_emotion = load_csv_values(os.path.join(subject_path, "emotion.csv"))
         subject_vad = load_csv_values(os.path.join(subject_path, "vad.csv"))
+        modified_vad = load_csv_values(os.path.join(subject_path, "modified_vad.csv"), col_slice=-1)
         subject_ppg = load_csv_values(os.path.join(subject_path, "ppg.csv"), col_slice=3)
 
         # Load frames
@@ -163,7 +166,8 @@ class MDMERLoader(BaseLoader):
         # Extract AU and emotion labels
         result = self.extract_face_labels(support_backend, openface_au_setting, emotion_source, 
                                           original_emotion_setting, include_dominance, libreface_dir, 
-                                          openface_dir, subject_emotion, subject_vad, frame_count)
+                                          openface_dir, subject_emotion, subject_vad, modified_vad, 
+                                          frame_count, include_au_intensity)
 
         au_occ_all, au_int_all, emotion_all, au_occ_colnames, au_int_colnames, emotion_colnames = result
 
@@ -179,7 +183,8 @@ class MDMERLoader(BaseLoader):
         file_list_dict[i] = list(zip(input_name_list, label_name_list))
 
     def extract_face_labels(self, backend, au_setting, emotion_source, emotion_setting, include_dominance, 
-                            libreface_dir, openface_dir, subject_emotion, subject_vad, frame_count):
+                            libreface_dir, openface_dir, subject_emotion, subject_vad, modified_vad, 
+                            frame_count, include_au_intensity):
         """Extract AU and emotion labels based on backend and configuration."""
 
         au_occ_list, au_int_list = [], []
@@ -187,46 +192,59 @@ class MDMERLoader(BaseLoader):
 
         # Load AU and emotion from LibreFace
         if backend in {'libreface', 'both'}:
-            occ_lf, int_lf, emo_lf, occ_cols, int_cols, emo_cols = self.extract_labels_libreface(libreface_dir)
-            au_occ_list.append(occ_lf)
-            au_int_list.append(int_lf)
-            au_occ_colnames += list(occ_cols)
-            au_int_colnames += list(int_cols)
+            try:
+                occ_lf, int_lf, emo_lf, occ_cols, int_cols, emo_cols = self.extract_labels_libreface(libreface_dir, include_au_intensity=True)
+                if occ_lf.size > 0:
+                    au_occ_list.append(occ_lf)
+                    au_occ_colnames += list(occ_cols)
+                if include_au_intensity and int_lf.size > 0:
+                    au_int_list.append(int_lf)
+                    au_int_colnames += list(int_cols)
 
-            if emotion_source == 'libreface':
-                emotion_data = emo_lf
-                emotion_colnames = list(emo_cols)
+                if emotion_source == 'libreface':
+                    emotion_data = emo_lf
+                    emotion_colnames = list(emo_cols)
+            except FileNotFoundError as e:
+                print(f"Warning: {e}")
 
         # Load AU from OpenFace
         if backend in {'openface', 'both'}:
             openface_cfg = {'dynamic': [('au_dynamic', '')],
                             'dynamic_wild': [('au_dynamic_wild', '_wild')],
                             'static': [('au_static', '_static')],
-                            'static_wild': [('au_static_wild', '_static_wild')]}
+                            'static_wild': [('au_static_wild', '_static_wild')],
+                            'all': [('au_dynamic', ''), ('au_static_wild', '_static_wild')]}
 
             if au_setting not in openface_cfg:
                 raise ValueError(f"Unsupported OPENFACE_AU_SETTING: {au_setting}")
 
             occ_all, int_all, occ_cols, int_cols = [], [], [], []
             for subdir, suffix in openface_cfg[au_setting]:
-                occ, intensity, *cols = self.extract_labels_openface(openface_dir, subdir, suffix)
-                occ_all.append(occ)
-                int_all.append(intensity)
-                occ_cols += cols[0]
-                int_cols += cols[1]
+                try:
+                    occ, intensity, *cols = self.extract_labels_openface(openface_dir, subdir, suffix)
+                    if occ.size > 0:
+                        occ_all.append(occ)
+                        occ_cols += cols[0]
+                    if intensity.size > 0:
+                        int_all.append(intensity)
+                        int_cols += cols[1]
+                except FileNotFoundError as e:
+                    print(f"Warning: {e}")
 
-            au_occ_list.append(np.concatenate(occ_all, axis=1))
-            au_int_list.append(np.concatenate(int_all, axis=1))
+            if occ_all:
+                au_occ_list.append(np.concatenate(occ_all, axis=1))
+            if int_all:
+                au_int_list.append(np.concatenate(int_all, axis=1))
             au_occ_colnames += occ_cols
             au_int_colnames += int_cols
 
         # Ensure AUs were collected
-        if not au_occ_list or not au_int_list:
+        if not au_occ_list and not au_int_list:
             raise ValueError(f"No AU features loaded with backend '{backend}' and AU setting '{au_setting}'")
 
         # Combine AU features
-        au_occ_all = np.concatenate(au_occ_list, axis=1)
-        au_int_all = np.concatenate(au_int_list, axis=1)
+        au_occ_all = np.concatenate(au_occ_list, axis=1) if au_occ_list else np.empty((frame_count, 0))
+        au_int_all = np.concatenate(au_int_list, axis=1) if au_int_list else np.empty((frame_count, 0))
 
         # Load emotion data from original if not libreface
         if emotion_source == 'original':
@@ -236,11 +254,22 @@ class MDMERLoader(BaseLoader):
             elif emotion_setting == 'vad':
                 emotion_data = subject_vad if include_dominance else subject_vad[:, :2]
                 emotion_colnames = ['arousal', 'valence', 'dominance'] if include_dominance else ['arousal', 'valence']
-            elif emotion_setting == 'both':
+            elif emotion_setting == 'dvad':
                 vad_part = subject_vad if include_dominance else subject_vad[:, :2]
                 vad_cols = ['arousal', 'valence', 'dominance'] if include_dominance else ['arousal', 'valence']
                 emotion_data = np.concatenate([subject_emotion, vad_part], axis=1)
                 emotion_colnames = ['amusement', 'disgust'] + vad_cols
+            elif emotion_setting == 'modified':
+                # Define the mapping from emotion to integer label
+                emotion_mapping = {"Happiness": 0,
+                                   "Anger": 1,
+                                   "Fear": 2,
+                                   "Sadness": 3,
+                                   "Calm": 4,
+                                   "Neutral": 5}
+                
+                emotion_data = self.map_emotion(modified_vad, emotion_mapping)
+                emotion_colnames = ['emotion_quadrant']
             else:
                 raise ValueError(f"Unsupported ORIGINAL_EMOTION_SETTING: {emotion_setting}")
 
@@ -252,7 +281,7 @@ class MDMERLoader(BaseLoader):
             if label_data.shape[0] != frame_count:
                 raise ValueError(f"{label_name} shape mismatch: got {label_data.shape[0]}, expected {frame_count}")
 
-        return au_occ_all, au_int_all, emotion_data, au_occ_colnames, au_int_colnames, emotion_colnames
+        return au_occ_all, au_int_all if include_au_intensity else None, emotion_data, au_occ_colnames, au_int_colnames, emotion_colnames
 
     def save_combined_label_names(self, ppg_colnames, au_occ_colnames, au_int_colnames, emotion_colnames):
         """Saves combined column names for all labels used in training."""
@@ -354,9 +383,26 @@ class MDMERLoader(BaseLoader):
             normalized_ppg[~np.isfinite(normalized_ppg)] = 0  # set inf or NaN to 0
 
         return normalized_ppg
-        
-    @staticmethod
-    def extract_labels_libreface(aucoding_dir):
+    
+    def map_emotion(self, data, emotion_mapping):
+        """
+        Maps emotions in data to integer labels using a provided mapping.
+
+        Args:
+            data (np.ndarray or pd.Series): Array or Series containing emotion labels.
+            emotion_mapping (dict): Dictionary mapping emotion strings to integer labels.
+
+        Returns:
+            np.ndarray: Array with integer labels for emotions.
+        """
+        # Convert numpy array to pandas Series if necessary
+        if isinstance(data, np.ndarray):
+            data = pd.Series(data.flatten())  # Flatten in case of multi-dimensional array
+
+        # Apply the mapping to the data
+        return data.map(emotion_mapping).fillna(-1).astype(int).to_numpy()
+    
+    def extract_labels_libreface(self, aucoding_dir, include_au_intensity=True):
         # Locate the correct file
         for fname in ("full_output_processed.csv", "full_output.csv"):
             full_path = os.path.join(aucoding_dir, fname)
@@ -366,7 +412,8 @@ class MDMERLoader(BaseLoader):
             raise FileNotFoundError(f"No suitable CSV file found in {aucoding_dir}")
 
         # Define known AU columns and emotion
-        au_occ_cols = [f'au_{i}' for i in [1, 2, 4, 6, 7, 10, 12, 14, 15, 17, 23, 24]]
+        # au_occ_cols = [f'au_{i}' for i in [1, 2, 4, 6, 7, 10, 12, 14, 15, 17, 23, 24]]
+        au_occ_cols = [f'au_{i}' for i in [4, 6, 10, 14, 17, 24]]
         au_int_cols = [f'au_{i}_intensity' for i in [1, 2, 4, 5, 6, 9, 12, 15, 17, 20, 25, 26]]
         emotion_col = ['facial_expression']
 
@@ -384,16 +431,16 @@ class MDMERLoader(BaseLoader):
                            "Anger": 6,
                            "Contempt": 7}
         
-        df['facial_expression'] = df['facial_expression'].map(emotion_mapping).fillna(-1).astype(int)
+        df['facial_expression'] = self.map_emotion(df['facial_expression'], emotion_mapping)
 
         # Extract column groups
         au_occ = df[au_occ_cols]
-        au_int = df[au_int_cols]
+        au_int = df[au_int_cols] if include_au_intensity else None
         emotion = df[['facial_expression']]
 
         # Create renamed versions of columns
         au_occ_column_names = [f'AU{col[3:]}_lf' for col in au_occ_cols]
-        au_int_column_names = [f'AU{col[3:-10]}_int_lf' for col in au_int_cols]
+        au_int_column_names = [f'AU{col[3:-10]}_int_lf' for col in au_int_cols] if include_au_intensity else []
         emotion_column_name = ['emotion_lf']
 
         return (au_occ, au_int, emotion,
@@ -408,6 +455,7 @@ class MDMERLoader(BaseLoader):
         if not os.path.exists(full_path):
             raise FileNotFoundError(f"CSV file not found at path: {full_path}")
 
+        """
         # Define AU column names
         au_intensity_cols = ["AU01_r", "AU02_r", "AU04_r", "AU05_r", "AU06_r", "AU07_r", "AU09_r",
                              "AU10_r", "AU12_r", "AU14_r", "AU15_r", "AU17_r", "AU20_r",
@@ -416,6 +464,17 @@ class MDMERLoader(BaseLoader):
         au_occurrence_cols = ["AU01_c", "AU02_c", "AU04_c", "AU05_c", "AU06_c", "AU07_c", "AU09_c",
                               "AU10_c", "AU12_c", "AU14_c", "AU15_c", "AU17_c", "AU20_c",
                               "AU23_c", "AU25_c", "AU26_c", "AU28_c", "AU45_c"]
+        """
+
+        au_intensity_cols = []
+        au_occurrence_cols = []
+
+        if dir_name == "au_dynamic":
+            au_intensity_cols = []
+            au_occurrence_cols = ["AU05_c", "AU07_c"]
+        if dir_name == "au_static_wild":
+            au_intensity_cols = []
+            au_occurrence_cols = ["AU20_c", "AU45_c"]
 
         # Read only needed columns
         usecols = au_intensity_cols + au_occurrence_cols

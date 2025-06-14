@@ -45,7 +45,7 @@ class BaseLoader(Dataset):
         parser.add_argument("--preprocess", default=None, action='store_true')
         return parser
 
-    def __init__(self, dataset_name, raw_data_path, config_data):
+    def __init__(self, dataset_name, raw_data_path, config_data, subject_dirs=None):
         """
         Initializes the BaseLoader instance.
 
@@ -91,13 +91,13 @@ class BaseLoader(Dataset):
         assert (config_data.BEGIN > 0 or config_data.BEGIN == 0)
         assert (config_data.END < 1 or config_data.END == 1)
 
+        # Use provided subject_dirs if given, else load from path
+        self.raw_data_dirs = subject_dirs if subject_dirs is not None else self.get_raw_data(raw_data_path)
+
         # If preprocessing is required
         if config_data.DO_PREPROCESS:
-            # Retrieve raw data directories
-            self.raw_data_dirs = self.get_raw_data(self.raw_data_path)
-
             # Preprocess the dataset
-            self.preprocess_dataset(self.raw_data_dirs, config_data.PREPROCESS, config_data.BEGIN, config_data.END)
+            self.preprocess_dataset(self.raw_data_dirs, config_data.PREPROCESS)
         else:
             # Check if cached data path exists
             if not os.path.exists(self.cached_path):
@@ -107,9 +107,6 @@ class BaseLoader(Dataset):
             # Check if file list path exists
             if not os.path.exists(self.file_list_path):
                 print('File list does not exist... generating now...')
-
-                # Retrieve raw data directories
-                self.raw_data_dirs = self.get_raw_data(self.raw_data_path)
 
                 # Generate file list retroactively
                 self.build_file_list_retroactive(self.raw_data_dirs, config_data.BEGIN, config_data.END)
@@ -131,7 +128,7 @@ class BaseLoader(Dataset):
         """
         raise Exception("'get_raw_data' Not Implemented")
 
-    def preprocess_dataset(self, data_dirs, config_preprocess, begin, end):
+    def preprocess_dataset_orig(self, data_dirs, config_preprocess, begin, end):
         """
         Parses and preprocesses all the raw data based on split.
 
@@ -156,6 +153,26 @@ class BaseLoader(Dataset):
         
         # Log the total number of raw files that were preprocessed
         print("Total Number of raw files preprocessed:", len(data_dirs_split), end='\n\n')
+
+    def preprocess_dataset(self, data_dirs, config_preprocess):
+        """
+        Parses and preprocesses all the raw data.
+
+        Args:
+            data_dirs (List[Dict]): A list of subject metadata dictionaries with 'index' and 'path'.
+            config_preprocess (CfgNode): Preprocessing configuration from config.yaml.
+        """
+
+        # Use multiprocessing to preprocess all subject directories
+        file_list_dict = self.multi_process_manager(data_dirs, config_preprocess)
+
+        # Build the file list CSV for loading
+        self.build_file_list(file_list_dict)
+
+        # Load preprocessed input/label file paths from that CSV
+        self.load_preprocessed_data()
+
+        print("Total Number of raw files preprocessed:", len(data_dirs), end='\n\n')
 
     def split_raw_data(self, data_dirs, begin, end):
         """
