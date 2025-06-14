@@ -8,7 +8,6 @@ from neural_methods import trainer
 from utils.seed_utils import seed_everything_custom
 from utils.label_helper import LabelHelper
 
-
 def add_args(parser):
     """Adds CLI arguments."""
     parser.add_argument('--config_file', default="configs/MDMER_BigSmall.yaml", type=str)
@@ -49,8 +48,8 @@ def run_model(config, dataloaders, train=True, test=True):
         print("[Warning] Neither training nor testing is enabled. Exiting run_model.")
         return
 
-    use_amp = True
-    calculate_weights = True
+    use_amp = False
+    calculate_weights = False
 
     trainer_map = {
         "BigSmall": trainer.BigSmallTrainer.BigSmallTrainer,
@@ -65,7 +64,7 @@ def run_model(config, dataloaders, train=True, test=True):
 
     # Prepare weights only once if needed
     if train and calculate_weights:
-        label_helper = LabelHelper(config, num_emotion_classes=8)
+        label_helper = LabelHelper(config, num_emotion_classes=6)
         label_helper.compute_weights_and_save()
 
     # Instantiate trainer only once
@@ -99,7 +98,7 @@ def main():
             dataloaders["train"] = build_dataloader(mode="train", 
                                                     data_config=config.TRAIN.DATA,
                                                     batch_size=config.TRAIN.BATCH_SIZE,
-                                                    num_workers=8,
+                                                    num_workers=28,
                                                     shuffle=True,
                                                     generator=train_gen,
                                                     seed_worker=seed_worker)
@@ -108,7 +107,7 @@ def main():
                 dataloaders["valid"] = build_dataloader(mode="valid", 
                                                         data_config=config.VALID.DATA,
                                                         batch_size=config.TRAIN.BATCH_SIZE,
-                                                        num_workers=8,
+                                                        num_workers=28,
                                                         shuffle=False,
                                                         generator=general_gen,
                                                         seed_worker=seed_worker)
@@ -116,7 +115,7 @@ def main():
         dataloaders["test"] = build_dataloader(mode="test", 
                                                data_config=config.TEST.DATA,
                                                batch_size=config.INFERENCE.BATCH_SIZE,
-                                               num_workers=16,
+                                               num_workers=28,
                                                shuffle=False,
                                                generator=general_gen,
                                                seed_worker=seed_worker)

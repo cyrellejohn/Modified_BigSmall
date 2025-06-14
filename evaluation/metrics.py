@@ -26,6 +26,12 @@ def reform_data_to_numpy(data, flatten=True):
 
 def compute_metrics(pred, gt, snr, macc, config, filename_id):
     """Compute and print metrics."""
+
+    summary = {
+        "MAE": None, "RMSE": None, "MAPE": None,
+        "Pearson": None, "SNR": None, "MACC": None
+    }
+
     n = len(pred)
     if n == 0:
         print("[Warning] No valid samples. Metrics skipped.")
@@ -34,17 +40,20 @@ def compute_metrics(pred, gt, snr, macc, config, filename_id):
     for metric in config.TEST.METRICS:
         if metric == "MAE":
             err = np.abs(pred - gt)
+            summary["MAE"] = (err.mean(), err.std(ddof=1) / np.sqrt(n))
             print(f"\nMAE : {err.mean():.4f} +/- {err.std(ddof=1) / np.sqrt(n):.4f}")
 
         elif metric == "RMSE":
             rmse = np.sqrt(np.mean(np.square(pred - gt)))
             se = np.std(np.square(pred - gt), ddof=1) / np.sqrt(n)
+            summary["RMSE"] = (rmse, np.sqrt(se))
             print(f"RMSE : {rmse:.4f} +/- {np.sqrt(se):.4f}")
 
         elif metric == "MAPE":
             mask = gt != 0
             if mask.any():
                 ape = np.abs((pred[mask] - gt[mask]) / gt[mask])
+                summary["MAPE"] = (ape.mean() * 100, ape.std(ddof=1) / np.sqrt(mask.sum()) * 100)
                 print(f"MAPE : {ape.mean() * 100:.4f} +/- {ape.std(ddof=1) / np.sqrt(mask.sum()) * 100:.4f}")
             else:
                 print("MAPE : Skipped (all ground truth values are zero)")
@@ -52,12 +61,15 @@ def compute_metrics(pred, gt, snr, macc, config, filename_id):
         elif metric == "Pearson":
             corr = np.corrcoef(pred, gt)[0, 1]
             stderr = np.sqrt((1 - corr ** 2) / (n - 2)) if n > 2 else np.nan
+            summary["Pearson"] = (corr, stderr)
             print(f"Pearson : {corr:.4f} +/- {stderr:.4f}")
 
         elif metric == "SNR":
+            summary["SNR"] = (snr.mean(), snr.std(ddof=1) / np.sqrt(n))
             print(f"SNR (dB): {snr.mean():.4f} +/- {snr.std(ddof=1) / np.sqrt(n):.4f}")
 
         elif metric == "MACC":
+            summary["MACC"] = (macc.mean(), macc.std(ddof=1) / np.sqrt(n))
             print(f"MACC: {macc.mean():.4f} +/- {macc.std(ddof=1) / np.sqrt(n):.4f}")
 
         elif metric == "BA":
@@ -69,6 +81,8 @@ def compute_metrics(pred, gt, snr, macc, config, filename_id):
 
         else:
             raise ValueError(f"Unsupported metric type: {metric}")
+
+    return {k: v for k, v in summary.items() if v is not None}
 
 def plot_bland_altman(ground_truth, prediction, config, filename_id):
     """Generates Bland-Altman plots."""
@@ -140,5 +154,5 @@ def calculate_metrics(predictions, labels, config):
     else:
         raise ValueError(f"Unsupported TOOLBOX_MODE: {config.TOOLBOX_MODE}")
 
-    compute_metrics(np.array(pred_list), np.array(gt_list), np.array(snr_list), 
-                    np.array(macc_list), config, filename_id)
+    return compute_metrics(np.array(pred_list), np.array(gt_list), np.array(snr_list), 
+                           np.array(macc_list), config, filename_id)

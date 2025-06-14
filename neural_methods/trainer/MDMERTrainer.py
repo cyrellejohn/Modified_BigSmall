@@ -10,6 +10,8 @@ from neural_methods.trainer.BaseTrainer import BaseTrainer
 from evaluation.bigsmall_metrics import (calculate_ppg_metrics, calculate_au_metrics, calculate_emotion_metrics)
 from collections import Counter
 from torch.cuda.amp import GradScaler, autocast
+import json
+
 
 
 class BigSmallTrainer(BaseTrainer):
@@ -49,9 +51,9 @@ class BigSmallTrainer(BaseTrainer):
         # Label config
         self.train_ppg_colname = "pos_ppg"
         self.test_ppg_colname = "ppg"
-        self.emotion_colname = "emotion_lf"
-        self.set_label_weights = True
-        self.emotion_class = 8
+        self.emotion_colname = "emotion_quadrant"
+        self.set_label_weights = False
+        self.emotion_class = 6
 
         # Load and set label names
         label_path = os.path.dirname(train_cfg.DATA.DATA_PATH)
@@ -66,22 +68,58 @@ class BigSmallTrainer(BaseTrainer):
             self.num_train_batches = len(data_loader["train"])
             
             if self.set_label_weights:
-                au_weights, emotion_weights = self.load_loss_weights()
+                au_weights, emotion_weights = self.load_loss_weights('/teamspace/studios/this_studio/Modified_BigSmall/runs/exp/TRAINING_MDMER_SizeW128_SizeH128_ClipLength180_DataTypeDiffNormalized_Standardized_DataAugNone_LabelTypeDiffNormalized_CropFaceFalse_BackendHC_LargeBoxFalse_LargeSize1.5_DynamicDetFalse_DetLength30_MedianFaceBoxFalse')
                 self.configure_loss(au_weights, emotion_weights)
             else:
                 self.configure_loss()
             
             self.configure_optimizers()
-
+    ''''
     def configure_optimizers(self):
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.LR)
         self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, 
                                                        max_lr=self.LR, 
                                                        epochs=self.max_epoch_num, 
                                                        steps_per_epoch=self.num_train_batches)
+    '''
+    
+    def configure_optimizers(self):
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.LR)  # e.g. 3e-4
+        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(self.optimizer,
+                                                             max_lr=3e-3, # peak LR
+                                                             epochs=self.max_epoch_num,
+                                                             steps_per_epoch=self.num_train_batches,
+                                                             div_factor=10.0,          # start = max_lr / 10 = 3e-4
+                                                             final_div_factor=100.0,  # end = start / 100 = 3e-6
+                                                             pct_start=0.3,
+                                                             anneal_strategy='cos')
+
+    @staticmethod
+    def save_metrics(metrics_dict, config, mode, epoch=None):
+        """
+        Saves evaluation metrics to disk in a structured JSON format.
+
+        Args:
+            metrics_dict (dict): Dictionary of metrics.
+            config: Configuration object with MODEL.MODEL_DIR.
+            mode (str): Mode of evaluation - 'train', 'valid', or 'test'.
+            epoch (int, optional): Epoch index for saving per-epoch metrics.
+        """
+        model_dir = config.MODEL.MODEL_DIR
+        metrics_dir = os.path.join(model_dir, "metrics")
+        os.makedirs(metrics_dir, exist_ok=True)
+
+        filename = f"{mode}_metrics.json" if epoch is None else f"{mode}_metrics_epoch_{epoch}.json"
+        filepath = os.path.join(metrics_dir, filename)
+
+        with open(filepath, "w") as f:
+            json.dump(metrics_dict, f, indent=4)
+
+        print(f"[INFO] Saved {mode} metrics to {filepath}")
+
 
     def set_label_indices(self, label_names):
-        self.au_indices = [i for i, name in enumerate(label_names) if "AU" in name and "int" not in name]
+        self.au_indices = [i for i, name in enumerate(label_names) if name.startswith("AU") and "int" not in name]
         try:
             self.ppg_train_index = label_names.index(self.train_ppg_colname)
             self.ppg_test_index = label_names.index(self.test_ppg_colname)
@@ -171,35 +209,42 @@ class BigSmallTrainer(BaseTrainer):
         return [big_data, small_data], labels
 
     def send_data_to_device(self, data, labels):
-        data = tuple(d.to(self.device, non_blocking=True) for d in data)
+        data = tuple(d.to(self.device, non_blocking=True).float() for d in data)
         labels = labels.to(self.device, non_blocking=True)
         return data, labels
 
     def compute_loss(self, outputs, labels, mode="Train"):
-        au_output, ppg_output, emotion_output = outputs
+        (au_output, ppg_output, emotion_output,
+        log_sigma_au, log_sigma_ppg, log_sigma_emotion) = outputs
+
         total_loss = 0.0
         losses = {"AU": None, "PPG": None, "Emotion": None}
 
         if self.train_au:
             au_target = labels[:, self.au_indices]
-            losses["AU"] = self.criterionAU(au_output, au_target)
-            total_loss += losses["AU"]
+            au_loss = self.criterionAU(au_output, au_target)
+            weighted_au_loss = (1.0 / (2 * torch.exp(log_sigma_au))) * au_loss + log_sigma_au / 2
+            losses["AU"] = weighted_au_loss
+            total_loss += weighted_au_loss
 
         if self.train_ppg:
             ppg_target = labels[:, self.ppg_train_index].unsqueeze(-1)
-            losses["PPG"] = self.criterionPPG(ppg_output, ppg_target)
-            total_loss += losses["PPG"]
+            ppg_loss = self.criterionPPG(ppg_output, ppg_target)
+            weighted_ppg_loss = (1.0 / (2 * torch.exp(log_sigma_ppg))) * ppg_loss + log_sigma_ppg / 2
+            losses["PPG"] = weighted_ppg_loss
+            total_loss += weighted_ppg_loss
 
         if self.train_emotion:
             emotion_target = labels[:, self.emotion_index].long()
-            losses["Emotion"] = self.criterionEmotion(emotion_output, emotion_target)
-            total_loss += losses["Emotion"]
-        
+            emotion_loss = self.criterionEmotion(emotion_output, emotion_target)
+            weighted_emotion_loss = (1.0 / (2 * torch.exp(log_sigma_emotion))) * emotion_loss + log_sigma_emotion / 2
+            losses["Emotion"] = weighted_emotion_loss
+            total_loss += weighted_emotion_loss
+
         print()
-        # Optional: concise logging loop
         for task, loss_val in losses.items():
             if loss_val is not None:
-                print(f"{mode} {task} Loss: {loss_val}")
+                print(f"{mode} {task} Loss: {loss_val.item():.4f}")
 
         return total_loss, losses["AU"], losses["PPG"], losses["Emotion"]
 
@@ -220,7 +265,7 @@ class BigSmallTrainer(BaseTrainer):
             tbar = tqdm(train_loader, ncols=80, desc=f"\nTrain Epoch: {epoch}")
             for idx, (data, labels, _, _) in enumerate(tbar):
                 data, labels = self.send_data_to_device(*self.format_data_shape(data, labels))
-                
+
                 total_loss, au_loss, ppg_loss, emotion_loss = self.backward_step(data, labels)
                 self.scheduler.step()
 
@@ -236,7 +281,6 @@ class BigSmallTrainer(BaseTrainer):
                     running_loss = 0.0
 
                 tbar.set_postfix(loss=total_loss.item(), lr=self.optimizer.param_groups[0]["lr"])
-                
 
             mean_train_losses.append(np.mean(epoch_losses["Loss"]))
             self.save_model(epoch)
@@ -272,6 +316,41 @@ class BigSmallTrainer(BaseTrainer):
 
         return total_loss, au_loss, ppg_loss, emotion_loss
 
+    def backward_step(self, data, labels):
+        """
+        Performs the forward, backward, and optimizer step with AMP support and gradient clipping.
+        
+        Returns:
+            tuple: (total_loss, au_loss, ppg_loss, emotion_loss)
+        """
+        self.optimizer.zero_grad()
+
+        if self.use_amp:
+            with autocast():
+                outputs = self.model(data)
+                total_loss, au_loss, ppg_loss, emotion_loss = self.compute_loss(outputs, labels)
+            
+            self.scaler.scale(total_loss).backward()
+
+            # 🔒 Unscale before clipping gradients (important for AMP!)
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            outputs = self.model(data)
+            total_loss, au_loss, ppg_loss, emotion_loss = self.compute_loss(outputs, labels)
+
+            total_loss.backward()
+
+            # 🔒 Clip gradients before optimizer step (standard FP32)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+            self.optimizer.step()
+
+        return total_loss, au_loss, ppg_loss, emotion_loss
+
     def save_model(self, index=None, best_model=False):
         """
         Saves the model state to a file.
@@ -297,6 +376,7 @@ class BigSmallTrainer(BaseTrainer):
         torch.save(self.model.state_dict(), model_path)
         print(f"Saved Model Path: {model_path}\n")
 
+    '''
     def valid(self, data_loader, epoch=None, save_best_model=False):
         """
         Evaluates the model on the validation set, logs metrics, and optionally saves the best model.
@@ -351,16 +431,61 @@ class BigSmallTrainer(BaseTrainer):
                     print(f"No Update | Best: Epoch {self.best_epoch}, Loss: {self.min_valid_loss:.4f}")
 
         return mean_losses["total"]
+    '''
+
+    def valid(self, data_loader, epoch=None, save_best_model=False):
+        valid_loader = data_loader.get("valid")
+        if valid_loader is None:
+            raise ValueError("No Validation Data Provided.")
+
+        print("\n=== Validating ===\n")
+        self.model.eval()
+
+        self.current_eval_mode = "valid"
+        self.current_eval_epoch = epoch
+
+        losses = {"total": [], "au": [], "ppg": [], "emotion": []}
+        preds_dict = {"au": {}, "ppg": {}, "emotion": {}}
+        labels_dict = {"au": {}, "ppg": {}, "emotion": {}}
+
+        with torch.no_grad():
+            for data, labels, subject_ids, chunk_ids in tqdm(valid_loader, ncols=80, desc="\nValidation"):
+                batch_size = labels.shape[0]
+                data, labels = self.send_data_to_device(*self.format_data_shape(data, labels))
+
+                outputs = self.model(data)
+                loss, au_loss, ppg_loss, emotion_loss = self.compute_loss(outputs, labels, mode="Valid")
+
+                losses["total"].append(loss.item())
+                losses["au"].append(au_loss.item())
+                losses["ppg"].append(ppg_loss.item())
+                losses["emotion"].append(emotion_loss.item())
+
+                preds_batch, labels_batch = self.process_predictions(outputs, labels, subject_ids, chunk_ids, batch_size)
+                self.update_predictions(preds_dict, labels_dict, preds_batch, labels_batch)
+
+        mean_losses = {k: np.mean(v) for k, v in losses.items()}
+        print(f"Validation Loss @ Epoch {epoch}: {mean_losses['total']:.4f}")
+
+        if save_best_model and mean_losses["total"] < self.min_valid_loss:
+            self.best_epoch = epoch
+            self.min_valid_loss = mean_losses["total"]
+            self.save_model(epoch, best_model=True)
+            print(f"New Best Model @ Epoch {epoch} | Loss: {mean_losses['total']:.4f}")
+        else:
+            print(f"No Update | Best: Epoch {self.best_epoch}, Loss: {self.min_valid_loss:.4f}")
+
+        self.evaluate_predictions(preds_dict, labels_dict)
+
+        return mean_losses["total"]
 
     def test(self, data_loader):
-        """Runs model evaluation on the testing dataset with metrics and loss tracking."""
         test_loader = data_loader.get("test")
         if test_loader is None:
             raise ValueError("No Testing Data Provided.")
 
         print("\n=== Testing ===\n")
 
-        # Load model
         if self.config.TOOLBOX_MODE == "only_test":
             model_path = self.config.INFERENCE.MODEL_PATH
             print("Using Pretrained Model for Testing.")
@@ -375,6 +500,9 @@ class BigSmallTrainer(BaseTrainer):
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.to(self.device)
         self.model.eval()
+
+        self.current_eval_mode = "test"
+        self.current_eval_epoch = None
 
         preds_dict = {"au": {}, "ppg": {}, "emotion": {}}
         labels_dict = {"au": {}, "ppg": {}, "emotion": {}}
@@ -408,7 +536,7 @@ class BigSmallTrainer(BaseTrainer):
         emotion_output = torch.softmax(outputs[2], dim=1) if self.train_emotion else None
 
         for idx in range(batch_size):
-            if idx * self.chunk_len >= batch_size and self.using_TSM:
+            if self.using_TSM and (idx * self.chunk_len >= au_output.shape[0]):
                 continue
 
             sid = subject_ids[idx]
@@ -429,8 +557,10 @@ class BigSmallTrainer(BaseTrainer):
 
         return prediction, ground_truth
 
+    '''
     def evaluate_predictions(self, preds_dict, labels_dict):
-        class_emotions = ["Neutral", "Happiness", "Sadness", "Anger", "Surprise", "Fear", "Disgust"]
+        # class_emotions = ["Neutral", "Happiness", "Sadness", "Anger", "Surprise", "Fear", "Disgust"]
+        class_emotions = ["Happiness", "Anger", "Fear", "Sadness", "Calm", "Neutral"]
         eval_tasks = {
             "ppg": {
                 "enabled": self.enable_ppg_eval,
@@ -456,6 +586,41 @@ class BigSmallTrainer(BaseTrainer):
                 config["function"](preds_dict[task], labels_dict[task], self.config, *config["extra_args"])
             except Exception as e:
                 print(f"[Error] Failed to compute {task.upper()} metrics: {e}")
+    '''
+
+    def evaluate_predictions(self, preds_dict, labels_dict):
+        class_emotions = ["Happiness", "Anger", "Fear", "Sadness", "Calm", "Neutral"]
+        eval_tasks = {
+            "ppg": {
+                "enabled": self.enable_ppg_eval,
+                "function": calculate_ppg_metrics,
+                "extra_args": []
+            },
+            "au": {
+                "enabled": self.enable_au_eval,
+                "function": calculate_au_metrics,
+                "extra_args": [[name for name in self.label_names if "AU" in name and "int" not in name]]
+            },
+            "emotion": {
+                "enabled": self.enable_emotion_eval,
+                "function": calculate_emotion_metrics,
+                "extra_args": [class_emotions]
+            }
+        }
+
+        all_metrics = {}
+
+        for task, config in eval_tasks.items():
+            if not config["enabled"] or task not in preds_dict or task not in labels_dict:
+                continue
+            try:
+                results = config["function"](preds_dict[task], labels_dict[task], self.config, *config["extra_args"])
+                all_metrics[task] = results
+            except Exception as e:
+                print(f"[Error] Failed to compute {task.upper()} metrics: {e}")
+
+        if hasattr(self, "current_eval_mode") and self.current_eval_mode:
+            self.save_metrics(all_metrics, self.config, mode=self.current_eval_mode, epoch=self.current_eval_epoch)
 
     def _reform_data_from_dict(self, data, flatten=True):
         """
