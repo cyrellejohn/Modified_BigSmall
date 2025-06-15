@@ -43,13 +43,13 @@ class LabelHelper:
     def _set_label_indices(self, label_names):
         self.au_indices = [i for i, name in enumerate(label_names) if "AU" in name and "int" not in name]
 
-        if "emotion_lf" in label_names:
-            self.emotion_index = label_names.index("emotion_lf")
+        if "emotion_lf" in label_names or "emotion_quadrant" in label_names:
+            self.emotion_index = label_names.index("emotion_lf") if "emotion_lf" in label_names else label_names.index("emotion_quadrant")
             if not self.discrete_emotion_exist:
-                raise ValueError("`discrete_emotion_exist` is False, but 'emotion_lf' found in label names.")
+                raise ValueError("`discrete_emotion_exist` is False, but emotion label found in label names.")
         else:
             if self.discrete_emotion_exist:
-                raise NotImplementedError("Discrete emotion 'emotion_lf' not found in label names.")
+                raise NotImplementedError("Discrete emotion label not found in label names.")
 
     def _get_label_paths(self):
         df = pd.read_csv(self.config.TRAIN.DATA.FILE_LIST_PATH, usecols=["label"])
